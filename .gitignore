@@ -1,0 +1,7 @@
+# Ignore everything by default
+*
+
+# Track only these files
+!.gitignore
+!configure_forms.py
+!MappingFormPS.qgz
