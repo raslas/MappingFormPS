@@ -55,6 +55,14 @@ def set_read_only(layer, field):
     cfg.setReadOnly(idx, True)
     layer.setEditFormConfig(cfg)
 
+def make_rel_editor(name, relation, parent, buttons=None):
+    # buttons bitmask: Link=1 Unlink=2 SaveChildEdits=4 Add=8 Duplicate=16 Delete=32 Zoom=64
+    # Omit buttons to keep QGIS default toolbar (safest — custom bitmasks can break Add).
+    elem = QgsAttributeEditorRelation(name, relation, parent)
+    if buttons is not None and hasattr(elem, "setRelationEditorConfiguration"):
+        elem.setRelationEditorConfiguration({"buttons": buttons})
+    return elem
+
 def add_field_elem(container, layer, field):
     idx = layer.fields().indexOf(field)
     if idx < 0:
@@ -109,7 +117,7 @@ r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",    hlavna,  "RECOR
 r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",      hlavna,  "RECORDID", druhy,     "fkRECORDID")
 r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",   hlavna,  "RECORDID", aktivity,  "fkRECORDID")
 r_fotky     = make_relation("r_hlavna_fotky",      "Fotky",      hlavna,  "RECORDID", fotky,     "fkRECORDID")
-r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia",  biotopy, "fid",      opatrenia, "fkHabBiotopyID")
+r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia",  biotopy, "id",       opatrenia, "fkHabBiotopyID")
 
 # ── tblHabHlavna ───────────────────────────────────────────────────────────────
 
@@ -182,25 +190,25 @@ root_h.addChildElement(t1)
 # Tab 2 – Biotopy
 t3 = make_group(root_h, "Biotopy", is_tab=True)
 if r_biotopy:
-    t3.addChildElement(QgsAttributeEditorRelation("Biotopy", r_biotopy, t3))
+    t3.addChildElement(make_rel_editor("Biotopy", r_biotopy, t3))
 root_h.addChildElement(t3)
 
 # Tab 4 – Druhy
 t4 = make_group(root_h, "Druhy", is_tab=True)
 if r_druhy:
-    t4.addChildElement(QgsAttributeEditorRelation("Druhy", r_druhy, t4))
+    t4.addChildElement(make_rel_editor("Druhy", r_druhy, t4))
 root_h.addChildElement(t4)
 
 # Tab 5 – Aktivity
 t5 = make_group(root_h, "Aktivity", is_tab=True)
 if r_aktivity:
-    t5.addChildElement(QgsAttributeEditorRelation("Aktivity", r_aktivity, t5))
+    t5.addChildElement(make_rel_editor("Aktivity", r_aktivity, t5))
 root_h.addChildElement(t5)
 
 # Tab 6 – Fotky
 t6 = make_group(root_h, "Fotky", is_tab=True)
 if r_fotky:
-    t6.addChildElement(QgsAttributeEditorRelation("Fotky", r_fotky, t6))
+    t6.addChildElement(make_rel_editor("Fotky", r_fotky, t6))
 root_h.addChildElement(t6)
 
 hlavna.setEditFormConfig(cfg_h)
@@ -211,9 +219,19 @@ print("\n=== tblHabBiotopy ===")
 
 set_hidden(biotopy, "fid")
 set_hidden(biotopy, "fkRECORDID")
+set_hidden(biotopy, "id")
+# id is the parent key for the Opatrenia relation. Using fid causes a QString/int
+# type error because QGIS serialises unsaved feature fids as strings. id is a plain
+# integer column so the type is preserved. Auto-generate a unique value on creation.
+idx_id = biotopy.fields().indexOf("id")
+if idx_id >= 0:
+    biotopy.setDefaultValueDefinition(idx_id, QgsDefaultValue(
+        "coalesce(maximum(\"id\") + 1, 1)",
+        applyOnUpdate=False,
+    ))
 
 for f, a in {
-    "id":                       "Poradie biotopu",
+    #"id":                       "Poradie biotopu",
     "biotop_cislo":             "Biotop – pôvodný kód",
     "biotop_pokryv":            "Pokryvnosť (%)",
     "biotop_cislo_new":         "Biotop – nový kód",
@@ -241,7 +259,8 @@ biotopy.setDefaultValueDefinition(biotopy.fields().indexOf("biotop_pokryv"), Qgs
 for f in ["kvalita_biotopu_good", "kvalita_biotopu_bad", "kvalita_biotopu_unsiut",
           "manazment_biotopu_vhod", "manazment_biotopu_nevhod",
           "vyhliadky_biotopu_good", "vyhliadky_biotopu_bad", "vyhliadky_biotopu_unsiut"]:
-    set_widget(biotopy, f, "CheckBox", {"CheckedState": "1", "UncheckedState": "0"})
+    set_widget(biotopy, f, "TextEdit", {"IsMultiline": False, "UseHtml": False})
+    biotopy.setDefaultValueDefinition(biotopy.fields().indexOf(f), QgsDefaultValue("0"))
 
 # Form layout: grouped (no tabs — this form opens as a child record)
 cfg_b = biotopy.editFormConfig()
@@ -250,7 +269,7 @@ root_b = cfg_b.invisibleRootContainer()
 root_b.clear()
 
 grp_bio = make_group(root_b, "Biotop")
-for f in ["id", "biotop_cislo", "biotop_pokryv", "biotop_cislo_new"]:
+for f in ["biotop_cislo", "biotop_pokryv", "biotop_cislo_new"]:
     add_field_elem(grp_bio, biotopy, f)
 root_b.addChildElement(grp_bio)
 
@@ -271,7 +290,7 @@ root_b.addChildElement(grp_vyh)
 
 if r_opatrenia:
     grp_opatr = make_group(root_b, "Opatrenia")
-    grp_opatr.addChildElement(QgsAttributeEditorRelation("Opatrenia", r_opatrenia, grp_opatr))
+    grp_opatr.addChildElement(make_rel_editor("Opatrenia", r_opatrenia, grp_opatr))
     root_b.addChildElement(grp_opatr)
 
 biotopy.setEditFormConfig(cfg_b)
@@ -339,7 +358,7 @@ for f, a in {
     "KOD":             "Druh (výber zo zoznamu)",
     "NAZOV_LAT":       "Latinský názov (auto)",
     "KOD_KB":          "Kód KB",
-    "POKRYVNOST":      "Pokryvnosť – B-B trieda",
+    "POKRYVNOST":      "Pokryvnosť",
     "etaz":            "Etáž",
     "pokryvnost_perc": "Pokryvnosť (%)",
 }.items():
@@ -366,6 +385,7 @@ set_widget(druhy, "POKRYVNOST", "ValueMap", {
 set_widget(druhy, "etaz", "ValueMap", {
     "map": {"E0": "E0", "E1": "E1", "E2": "E2", "E3": "E3"},
 })
+druhy.setDefaultValueDefinition(druhy.fields().indexOf("etaz"), QgsDefaultValue("'E1'"))
 set_widget(druhy, "pokryvnost_perc", "TextEdit", {"IsMultiline": False, "UseHtml": False})
 druhy.setDefaultValueDefinition(druhy.fields().indexOf("pokryvnost_perc"), QgsDefaultValue("0"))
 
