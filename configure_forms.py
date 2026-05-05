@@ -1,8 +1,8 @@
 # configure_forms.py
 #
 # Run once in the QGIS Python console (Plugins > Python Console > open script).
-# Configures all relations, field widgets, aliases, and form layouts
-# for the MappingFormPS field-mapping project.
+# Regenerates all widget, alias, default-value, and form-layout configuration
+# to exactly match the current SKUEV0257.qgs project state.
 
 from qgis.core import (
     QgsProject,
@@ -14,9 +14,11 @@ from qgis.core import (
     QgsAttributeEditorField,
     QgsAttributeEditorRelation,
     QgsDefaultValue,
+    QgsOptionalExpression,
+    QgsExpression,
 )
 
-project  = QgsProject.instance()
+project   = QgsProject.instance()
 gpkg_path = project.homePath() + "/SKUEV0257.gpkg"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -55,25 +57,52 @@ def set_read_only(layer, field):
     cfg.setReadOnly(idx, True)
     layer.setEditFormConfig(cfg)
 
-def make_rel_editor(name, relation, parent, buttons=None):
-    # buttons bitmask: Link=1 Unlink=2 SaveChildEdits=4 Add=8 Duplicate=16 Delete=32 Zoom=64
-    # Omit buttons to keep QGIS default toolbar (safest — custom bitmasks can break Add).
-    elem = QgsAttributeEditorRelation(name, relation, parent)
-    if buttons is not None and hasattr(elem, "setRelationEditorConfiguration"):
-        elem.setRelationEditorConfiguration({"buttons": buttons})
-    return elem
+def set_default(layer, field, expression, apply_on_update=False):
+    idx = layer.fields().indexOf(field)
+    if idx >= 0:
+        layer.setDefaultValueDefinition(idx, QgsDefaultValue(expression, applyOnUpdate=apply_on_update))
 
-def add_field_elem(container, layer, field):
+def add_field(container, layer, field):
     idx = layer.fields().indexOf(field)
     if idx < 0:
-        print(f"  WARNING: cannot add field to form: {layer.name()}.{field}")
+        print(f"  WARNING: field missing in form: {layer.name()}.{field}")
         return
     container.addChildElement(QgsAttributeEditorField(field, idx, container))
 
-def make_group(parent, title, is_tab=False):
-    grp = QgsAttributeEditorContainer(title, parent)
-    grp.setIsGroupBox(not is_tab)
-    return grp
+def make_container(parent, name, ctype="groupbox", cols=1,
+                   visibility=None, show_label=True):
+    """
+    ctype: "groupbox" | "tab" | "row"
+    visibility: None (disabled) or QGIS expression string (enabled)
+    """
+    c = QgsAttributeEditorContainer(name, parent)
+    if hasattr(QgsAttributeEditorContainer, "Tab"):
+        # QGIS 3.32+: proper enum
+        if ctype == "tab":
+            c.setType(QgsAttributeEditorContainer.Tab)
+        elif ctype == "row":
+            c.setType(QgsAttributeEditorContainer.Row)
+        else:
+            c.setType(QgsAttributeEditorContainer.GroupBox)
+    else:
+        # Older QGIS: only groupbox vs tab
+        c.setIsGroupBox(ctype == "groupbox")
+    c.setColumnCount(cols)
+    c.setShowLabel(show_label)
+    if visibility is not None:
+        c.setVisibilityExpression(QgsOptionalExpression(QgsExpression(visibility)))
+    return c
+
+def make_rel_editor(name, relation, parent, extra_cfg=None, widget_type_id=None):
+    elem = QgsAttributeEditorRelation(name, relation, parent)
+    cfg = {"buttons": "AllButtons"}
+    if extra_cfg:
+        cfg.update(extra_cfg)
+    if hasattr(elem, "setRelationEditorConfiguration"):
+        elem.setRelationEditorConfiguration(cfg)
+    if widget_type_id and hasattr(elem, "setRelationWidgetTypeId"):
+        elem.setRelationWidgetTypeId(widget_type_id)
+    return elem
 
 # ── load layers ────────────────────────────────────────────────────────────────
 
@@ -95,15 +124,14 @@ print("\n=== Defining relations ===")
 rel_mgr = project.relationManager()
 
 def make_relation(rel_id, name, parent_layer, parent_field, child_layer, child_field):
-    # Remove stale copy if re-running the script
     existing = rel_mgr.relation(rel_id)
     if existing.isValid():
         rel_mgr.removeRelation(rel_id)
     r = QgsRelation()
     r.setId(rel_id)
     r.setName(name)
-    r.setReferencedLayer(parent_layer.id())   # 1-side
-    r.setReferencingLayer(child_layer.id())   # many-side
+    r.setReferencedLayer(parent_layer.id())
+    r.setReferencingLayer(child_layer.id())
     r.addFieldPair(child_field, parent_field)
     r.setStrength(QgsRelation.Association)
     if not r.isValid():
@@ -113,103 +141,152 @@ def make_relation(rel_id, name, parent_layer, parent_field, child_layer, child_f
     print(f"  OK: {name}")
     return r
 
-r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",    hlavna,  "RECORDID", biotopy,   "fkRECORDID")
-r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",      hlavna,  "RECORDID", druhy,     "fkRECORDID")
-r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",   hlavna,  "RECORDID", aktivity,  "fkRECORDID")
-r_fotky     = make_relation("r_hlavna_fotky",      "Fotky",      hlavna,  "RECORDID", fotky,     "fkRECORDID")
-r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia",  biotopy, "id",       opatrenia, "fkHabBiotopyID")
+r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",   hlavna,  "RECORDID", biotopy,   "fkRECORDID")
+r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",     hlavna,  "RECORDID", druhy,     "fkRECORDID")
+r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",  hlavna,  "RECORDID", aktivity,  "fkRECORDID")
+r_fotky     = make_relation("r_hlavna_fotky",      "Fotky",     hlavna,  "RECORDID", fotky,     "fkRECORDID")
+r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia", biotopy, "id",       opatrenia, "fkHabBiotopyID")
 
 # ── tblHabHlavna ───────────────────────────────────────────────────────────────
 
 print("\n=== tblHabHlavna ===")
 
-# Hidden (internal identifiers, not needed in the form)
-for f in ["fid", "polygon_id"]:
-    set_hidden(hlavna, f)
+set_hidden(hlavna, "fid")
+set_hidden(hlavna, "polygon_id")
 
-# Read-only (informational, pre-filled before field work)
-for f in ["RECORDID", "KOD_UEV", "podlaorta", "p"]:
+for f in ["KOD_UEV", "RECORDID", "p", "podlaorta"]:
     set_read_only(hlavna, f)
 
-# Aliases
 for f, a in {
-    "RECORDID":          "ID záznamu",
-    "KOD_UEV":           "SKUEV",
-    "podlaorta":         "Podľa orta",
-    "p":                 "Plocha (m²)",
-    "datum":             "Dátum mapovania",
-    "lokalita":          "Lokalita",
-    "hlavny_mapovatel":  "Hlavný mapovateľ",
-    "druhy_mapovatel":   "Druhý mapovateľ",
-    "poznamka":          "Poznámka",
-    "e0":                "E0 – prízemná vrstva (%)",
-    "e1":                "E1 – byliny (%)",
-    "e2":                "E2 – kry (%)",
-    "e3":                "E3 – stromy (%)",
-    "E1_invaz":          "E1 – invázne druhy (%)",
-    "E2_invaz":          "E2 – invázne druhy (%)",
-    "E3_invaz":          "E3 – invázne druhy (%)",
+    "KOD_UEV":          "SKUEV",
+    "podlaorta":        "Podľa orta",
+    "poznamka":         "Poznámka",
+    "p":                "Plocha (m²)",
+    "RECORDID":         "ID záznamu",
+    "datum":            "Dátum",
+    "lokalita":         "Lokalita",
+    "hlavny_mapovatel": "Mapovateľ",
+    "druhy_mapovatel":  "Druhý mapovateľ",
+    "e0":               "E0",
+    "e1":               "E1",
+    "e2":               "E2",
+    "e3":               "E3",
+    "E1_invaz":         "E1 invázky",
+    "E2_invaz":         "E2 invázky",
+    "E3_invaz":         "E3 invázky",
+    "typ_polygon":      "Typ polygónu 'A' alebo 'B'",
+    "polygon_id_form":  "ID rovnakého formulára",
 }.items():
     set_alias(hlavna, f, a)
 
-# Widgets
 set_widget(hlavna, "datum", "DateTime", {
-    "field_format":   "dd.MM.yyyy",
-    "display_format": "dd.MM.yyyy",
-    "calendar_popup": True,
-    "allow_null":     True,
+    "allow_null":             True,
+    "calendar_popup":         True,
+    "display_format":         "dd.MM.yyyy",
+    "field_format":           "dd.MM.yyyy",
+    "field_format_overwrite": False,
+    "field_iso_format":       False,
 })
+set_widget(hlavna, "KOD_UEV",          "TextEdit", {"IsMultiline": False, "UseHtml": False})
+set_widget(hlavna, "RECORDID",         "TextEdit", {"IsMultiline": False, "UseHtml": False})
+set_widget(hlavna, "hlavny_mapovatel", "TextEdit", {"IsMultiline": False, "UseHtml": False})
+set_widget(hlavna, "druhy_mapovatel",  "TextEdit", {"IsMultiline": False, "UseHtml": False})
+set_widget(hlavna, "poznamka",         "TextEdit", {"IsMultiline": True,  "UseHtml": False})
+
 for f in ["e0", "e1", "e2", "e3", "E1_invaz", "E2_invaz", "E3_invaz"]:
     set_widget(hlavna, f, "TextEdit", {"IsMultiline": False, "UseHtml": False})
-    idx = hlavna.fields().indexOf(f)
-    if idx >= 0:
-        hlavna.setDefaultValueDefinition(idx, QgsDefaultValue("0"))
-set_widget(hlavna, "poznamka", "TextEdit", {"IsMultiline": True, "UseHtml": False})
+    set_default(hlavna, f, "0")
 
-# Form layout: tabbed
+# ValueMap stored as ordered list to preserve A/B order
+set_widget(hlavna, "typ_polygon", "ValueMap", {
+    "map": [{"A": "A"}, {"B": "B"}],
+})
+set_widget(hlavna, "polygon_id_form", "TextEdit", {"IsMultiline": False, "UseHtml": False})
+
+# Form layout
 cfg_h = hlavna.editFormConfig()
 cfg_h.setLayout(QgsEditFormConfig.TabLayout)
 root_h = cfg_h.invisibleRootContainer()
 root_h.clear()
 
-# Tab 1 – Basic info + vegetation layers
-t1 = make_group(root_h, "Základné info", is_tab=True)
-for f in ["RECORDID", "KOD_UEV", "podlaorta", "p",
-          "datum", "lokalita", "hlavny_mapovatel", "druhy_mapovatel", "poznamka"]:
-    add_field_elem(t1, hlavna, f)
-grp_vrstvy = make_group(t1, "Zastúpenie vrstiev (%)")
+# ── Tab: Základné info ──
+t_zak = make_container(root_h, "Základné info", "tab")
+add_field(t_zak, hlavna, "typ_polygon")
+add_field(t_zak, hlavna, "polygon_id_form")
+
+# Unnamed 2-column GroupBox — hidden when polygon_id_form is filled (linked form)
+grp_ids = make_container(t_zak, "", "groupbox", cols=2,
+                         visibility='"polygon_id_form" is null')
+for f in ["RECORDID", "podlaorta", "p", "datum", "lokalita", "hlavny_mapovatel"]:
+    add_field(grp_ids, hlavna, f)
+t_zak.addChildElement(grp_ids)
+
+# Unnamed 1-column GroupBox — same visibility guard
+grp_outer = make_container(t_zak, "", "groupbox", cols=1,
+                           visibility='"polygon_id_form" is null')
+
+# Vegetation cover — only for type A polygons
+grp_pokryv = make_container(grp_outer, "Pokryvnosť etáží (%)", "groupbox", cols=2,
+                             visibility=" \"typ_polygon\" = 'A'")
+grp_vsetky = make_container(grp_pokryv, "Všetky druhy", "groupbox", cols=1)
 for f in ["e0", "e1", "e2", "e3"]:
-    add_field_elem(grp_vrstvy, hlavna, f)
-t1.addChildElement(grp_vrstvy)
-grp_invaz = make_group(t1, "Invázne druhy (%)")
+    add_field(grp_vsetky, hlavna, f)
+grp_pokryv.addChildElement(grp_vsetky)
+
+grp_invaz = make_container(grp_pokryv, "Invázne druhy", "groupbox", cols=1)
 for f in ["E1_invaz", "E2_invaz", "E3_invaz"]:
-    add_field_elem(grp_invaz, hlavna, f)
-t1.addChildElement(grp_invaz)
-root_h.addChildElement(t1)
+    add_field(grp_invaz, hlavna, f)
+grp_pokryv.addChildElement(grp_invaz)
+grp_outer.addChildElement(grp_pokryv)
 
-# Tab 2 – Biotopy
-t3 = make_group(root_h, "Biotopy", is_tab=True)
+# Poznámka row (label suppressed — field label is enough)
+row_pozn = make_container(grp_outer, "Poznámka", "row", show_label=False)
+add_field(row_pozn, hlavna, "poznamka")
+grp_outer.addChildElement(row_pozn)
+
+t_zak.addChildElement(grp_outer)
+root_h.addChildElement(t_zak)
+
+# ── Tab: Biotopy (hidden for linked-form polygons) ──
+t_bio = make_container(root_h, "Biotopy", "tab",
+                       visibility='"polygon_id_form" is null')
 if r_biotopy:
-    t3.addChildElement(make_rel_editor("Biotopy", r_biotopy, t3))
-root_h.addChildElement(t3)
+    t_bio.addChildElement(make_rel_editor(
+        "r_hlavna_biotopy", r_biotopy, t_bio,
+        extra_cfg={"allow_add_child_feature_with_no_geometry": False,
+                   "show_first_feature": True},
+        widget_type_id="relation_editor",
+    ))
+root_h.addChildElement(t_bio)
 
-# Tab 4 – Druhy
-t4 = make_group(root_h, "Druhy", is_tab=True)
+# ── Tabs: Druhy and Aktivity (type A only, not linked forms) ──
+_VIS_A = " (\"typ_polygon\" = 'A') AND (\"polygon_id_form\" is null)"
+
+t_druhy = make_container(root_h, "Druhy", "tab", visibility=_VIS_A)
 if r_druhy:
-    t4.addChildElement(make_rel_editor("Druhy", r_druhy, t4))
-root_h.addChildElement(t4)
+    t_druhy.addChildElement(make_rel_editor(
+        "r_hlavna_druhy", r_druhy, t_druhy,
+        extra_cfg={"allow_add_child_feature_with_no_geometry": False,
+                   "show_first_feature": True},
+        widget_type_id="relation_editor",
+    ))
+root_h.addChildElement(t_druhy)
 
-# Tab 5 – Aktivity
-t5 = make_group(root_h, "Aktivity", is_tab=True)
+t_akt = make_container(root_h, "Aktivity", "tab", visibility=_VIS_A)
 if r_aktivity:
-    t5.addChildElement(make_rel_editor("Aktivity", r_aktivity, t5))
-root_h.addChildElement(t5)
+    t_akt.addChildElement(make_rel_editor("r_hlavna_aktivity", r_aktivity, t_akt))
+root_h.addChildElement(t_akt)
 
-# Tab 6 – Fotky
-t6 = make_group(root_h, "Fotky", is_tab=True)
+# ── Tab: Fotky (permanently hidden — photos handled outside QFieldCloud) ──
+t_fotky = make_container(root_h, "Fotky", "tab", visibility="false")
 if r_fotky:
-    t6.addChildElement(make_rel_editor("Fotky", r_fotky, t6))
-root_h.addChildElement(t6)
+    t_fotky.addChildElement(make_rel_editor(
+        "r_hlavna_fotky", r_fotky, t_fotky,
+        extra_cfg={"allow_add_child_feature_with_no_geometry": False,
+                   "show_first_feature": True},
+        widget_type_id="relation_editor",
+    ))
+root_h.addChildElement(t_fotky)
 
 hlavna.setEditFormConfig(cfg_h)
 
@@ -220,18 +297,11 @@ print("\n=== tblHabBiotopy ===")
 set_hidden(biotopy, "fid")
 set_hidden(biotopy, "fkRECORDID")
 set_hidden(biotopy, "id")
-# id is the parent key for the Opatrenia relation. Using fid causes a QString/int
-# type error because QGIS serialises unsaved feature fids as strings. id is a plain
-# integer column so the type is preserved. Auto-generate a unique value on creation.
-idx_id = biotopy.fields().indexOf("id")
-if idx_id >= 0:
-    biotopy.setDefaultValueDefinition(idx_id, QgsDefaultValue(
-        "coalesce(maximum(\"id\") + 1, 1)",
-        applyOnUpdate=False,
-    ))
+# id is the parent key for the Opatrenia relation; auto-generate a unique integer.
+set_default(biotopy, "id", "coalesce(maximum(\"id\") + 1, 1)")
 
 for f, a in {
-    #"id":                       "Poradie biotopu",
+    "id":                       "Poradie biotopu",
     "biotop_cislo":             "Biotop – pôvodný kód",
     "biotop_pokryv":            "Pokryvnosť (%)",
     "biotop_cislo_new":         "Biotop – nový kód",
@@ -255,42 +325,48 @@ set_widget(biotopy, "biotop_cislo_new", "ValueRelation", {
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
 })
 set_widget(biotopy, "biotop_pokryv", "TextEdit", {"IsMultiline": False, "UseHtml": False})
-biotopy.setDefaultValueDefinition(biotopy.fields().indexOf("biotop_pokryv"), QgsDefaultValue("0"))
+set_default(biotopy, "biotop_pokryv", "100")
+
 for f in ["kvalita_biotopu_good", "kvalita_biotopu_bad", "kvalita_biotopu_unsiut",
           "manazment_biotopu_vhod", "manazment_biotopu_nevhod",
           "vyhliadky_biotopu_good", "vyhliadky_biotopu_bad", "vyhliadky_biotopu_unsiut"]:
     set_widget(biotopy, f, "TextEdit", {"IsMultiline": False, "UseHtml": False})
-    biotopy.setDefaultValueDefinition(biotopy.fields().indexOf(f), QgsDefaultValue("0"))
+    set_default(biotopy, f, "0")
 
-# Form layout: grouped (no tabs — this form opens as a child record)
+# Form layout
 cfg_b = biotopy.editFormConfig()
 cfg_b.setLayout(QgsEditFormConfig.TabLayout)
 root_b = cfg_b.invisibleRootContainer()
 root_b.clear()
 
-grp_bio = make_group(root_b, "Biotop")
+# Kvalita/Manažment/Vyhliadky hidden for type-B polygons (no quality assessment needed)
+_VIS_NOT_B = (
+    "attribute(get_feature('tblHabHlavna', 'RECORDID', \"fkRECORDID\"), 'typ_polygon') != 'B'"
+)
+
+grp_bio = make_container(root_b, "Biotop")
 for f in ["biotop_cislo", "biotop_pokryv", "biotop_cislo_new"]:
-    add_field_elem(grp_bio, biotopy, f)
+    add_field(grp_bio, biotopy, f)
 root_b.addChildElement(grp_bio)
 
-grp_kval = make_group(root_b, "Kvalita biotopu")
+grp_kval = make_container(root_b, "Kvalita biotopu", visibility=_VIS_NOT_B)
 for f in ["kvalita_biotopu_good", "kvalita_biotopu_bad", "kvalita_biotopu_unsiut"]:
-    add_field_elem(grp_kval, biotopy, f)
+    add_field(grp_kval, biotopy, f)
 root_b.addChildElement(grp_kval)
 
-grp_man = make_group(root_b, "Manažment")
+grp_man = make_container(root_b, "Manažment", visibility=_VIS_NOT_B)
 for f in ["manazment_biotopu_vhod", "manazment_biotopu_nevhod"]:
-    add_field_elem(grp_man, biotopy, f)
+    add_field(grp_man, biotopy, f)
 root_b.addChildElement(grp_man)
 
-grp_vyh = make_group(root_b, "Vyhliadky")
+grp_vyh = make_container(root_b, "Vyhliadky", visibility=_VIS_NOT_B)
 for f in ["vyhliadky_biotopu_good", "vyhliadky_biotopu_bad", "vyhliadky_biotopu_unsiut"]:
-    add_field_elem(grp_vyh, biotopy, f)
+    add_field(grp_vyh, biotopy, f)
 root_b.addChildElement(grp_vyh)
 
 if r_opatrenia:
-    grp_opatr = make_group(root_b, "Opatrenia")
-    grp_opatr.addChildElement(make_rel_editor("Opatrenia", r_opatrenia, grp_opatr))
+    grp_opatr = make_container(root_b, "Opatrenia")
+    grp_opatr.addChildElement(make_rel_editor("r_biotopy_opatrenia", r_opatrenia, grp_opatr))
     root_b.addChildElement(grp_opatr)
 
 biotopy.setEditFormConfig(cfg_b)
@@ -313,9 +389,9 @@ set_widget(opatrenia, "kod_opatrenia", "ValueRelation", {
     "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "name",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
 })
-set_widget(opatrenia, "detailny_opis_opatrenia", "TextEdit", {"IsMultiline": True, "UseHtml": False})
+set_widget(opatrenia, "detailny_opis_opatrenia",   "TextEdit", {"IsMultiline": True,  "UseHtml": False})
 set_widget(opatrenia, "percento_z_plochy_biotopu", "TextEdit", {"IsMultiline": False, "UseHtml": False})
-opatrenia.setDefaultValueDefinition(opatrenia.fields().indexOf("percento_z_plochy_biotopu"), QgsDefaultValue("0"))
+set_default(opatrenia, "percento_z_plochy_biotopu", "0")
 
 # ── tblAktivity ────────────────────────────────────────────────────────────────
 
@@ -336,15 +412,14 @@ set_widget(aktivity, "Aktivita", "ValueRelation", {
     "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "name",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
 })
-# ValueMap format: {"map": {"Display label": "stored_value", ...}}
 set_widget(aktivity, "Intenzita", "ValueMap", {
     "map": {"A – vysoká": "A", "B – stredná": "B", "C – nízka": "C"},
 })
 set_widget(aktivity, "Vplyv", "ValueMap", {
-    "map": {"p – pozitívny": "p", "n – negatívny": "n"},
+    "map": {"n – negatívny": "n", "p – pozitívny": "p"},
 })
 set_widget(aktivity, "Perc_Plochy", "TextEdit", {"IsMultiline": False, "UseHtml": False})
-aktivity.setDefaultValueDefinition(aktivity.fields().indexOf("Perc_Plochy"), QgsDefaultValue("0"))
+set_default(aktivity, "Perc_Plochy", "0")
 
 # ── tblHabDruhy ────────────────────────────────────────────────────────────────
 
@@ -352,7 +427,7 @@ print("\n=== tblHabDruhy ===")
 
 set_hidden(druhy, "fid")
 set_hidden(druhy, "fkRECORDID")
-set_hidden(druhy, "is_characetristic")   # not needed in form per requirements
+set_hidden(druhy, "is_characetristic")
 
 for f, a in {
     "KOD":             "Druh (výber zo zoznamu)",
@@ -364,20 +439,15 @@ for f, a in {
 }.items():
     set_alias(druhy, f, a)
 
-# KOD: combobox — stores Tax_id, displays Taxon_meno (5 944 species, completer enabled)
 set_widget(druhy, "KOD", "ValueRelation", {
     "Layer": lkp_druhy.id(), "Key": "Tax_id", "Value": "Taxon_meno",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": True,
 })
-
-# NAZOV_LAT: read-only; auto-filled from species lookup when record is saved
-idx_nazov = druhy.fields().indexOf("NAZOV_LAT")
-if idx_nazov >= 0:
-    set_read_only(druhy, "NAZOV_LAT")
-    druhy.setDefaultValueDefinition(idx_nazov, QgsDefaultValue(
-        "attribute(get_feature('tblHabDruhyLookup', 'Tax_id', \"KOD\"), 'Taxon_meno')",
-        applyOnUpdate=True,   # re-evaluate on every save, not only on new feature
-    ))
+# NAZOV_LAT: read-only, auto-filled from species lookup on every save
+set_read_only(druhy, "NAZOV_LAT")
+set_default(druhy, "NAZOV_LAT",
+    "attribute(get_feature('tblHabDruhyLookup', 'Tax_id', \"KOD\"), 'Taxon_meno')",
+    apply_on_update=True)
 
 set_widget(druhy, "POKRYVNOST", "ValueMap", {
     "map": {"1": "1", "2a": "2a", "2b": "2b", "3": "3"},
@@ -385,9 +455,9 @@ set_widget(druhy, "POKRYVNOST", "ValueMap", {
 set_widget(druhy, "etaz", "ValueMap", {
     "map": {"E0": "E0", "E1": "E1", "E2": "E2", "E3": "E3"},
 })
-druhy.setDefaultValueDefinition(druhy.fields().indexOf("etaz"), QgsDefaultValue("'E1'"))
+set_default(druhy, "etaz", "'E1'")
 set_widget(druhy, "pokryvnost_perc", "TextEdit", {"IsMultiline": False, "UseHtml": False})
-druhy.setDefaultValueDefinition(druhy.fields().indexOf("pokryvnost_perc"), QgsDefaultValue("0"))
+set_default(druhy, "pokryvnost_perc", "0")
 
 # ── tblHabFotky ────────────────────────────────────────────────────────────────
 
@@ -397,17 +467,68 @@ set_hidden(fotky, "fid")
 set_hidden(fotky, "fkRECORDID")
 set_alias(fotky, "fotoFileName", "Názov súboru")
 
-# ExternalResource: QField captures photo with camera, stores filename only.
-# Attachments are NOT synced via QFieldCloud — photos are transferred separately.
+# QField captures photos with the camera; filenames stored relative to project folder.
+# Photos are NOT synced via QFieldCloud — transferred separately.
 set_widget(fotky, "fotoFileName", "ExternalResource", {
-    "UseLink":          False,
-    "FullUrl":          False,
-    "RelativeStorage":  1,       # 1 = relative to project folder
-    "StorageMode":      1,       # 1 = capture media (camera)
-    "DocumentViewer":   2,       # 2 = image viewer
+    "DocumentViewer":   2,
     "FileWidgetFilter": "Images (*.jpg *.jpeg *.png *.JPG *.JPEG *.PNG)",
+    "FullUrl":          False,
     "PropertyCollection": {},
+    "RelativeStorage":  1,
+    "StorageMode":      1,
+    "UseLink":          False,
 })
+
+# ── QFieldSync / QFieldCloud configuration ─────────────────────────────────────
+
+print("\n=== QFieldSync configuration ===")
+
+for layer, action in {
+    hlavna:         "offline",
+    biotopy:        "offline",
+    opatrenia:      "offline",
+    druhy:          "offline",
+    aktivity:       "offline",
+    fotky:          "offline",
+    lkp_aktivita:   "copy",
+    lkp_druhy:      "copy",
+    lkp_biotop:     "copy",
+    lkp_biotop_new: "copy",
+}.items():
+    layer.setCustomProperty("QFieldSync/action", action)
+    print(f"  {layer.name()}: {action}")
+
+hlavna.setDisplayExpression('"RECORDID" || \' – \' || "KOD_UEV"')
+biotopy.setDisplayExpression('"biotop_cislo"')
+druhy.setDisplayExpression('"NAZOV_LAT"')
+aktivity.setDisplayExpression('"Aktivita"')
+print("  display expressions set")
+
+root = project.layerTreeRoot()
+for lyr in [lkp_aktivita, lkp_druhy, lkp_biotop, lkp_biotop_new]:
+    node = root.findLayer(lyr.id())
+    if node:
+        node.setItemVisibilityChecked(False)
+        print(f"  hidden: {lyr.name()}")
+
+relief_layers = project.mapLayersByName("relief")
+if relief_layers:
+    project.writeEntry("QFieldSync", "createBaseMap",            1)
+    project.writeEntry("QFieldSync", "baseMapType",              "singleLayer")
+    project.writeEntry("QFieldSync", "baseMapLayer",             relief_layers[0].id())
+    project.writeEntry("QFieldSync", "baseMapTileSize",          1024)
+    project.writeEntry("QFieldSync", "baseMapTilesMinZoomLevel", 8)
+    project.writeEntry("QFieldSync", "baseMapTilesMaxZoomLevel", 14)
+    print(f"  base map: relief ({relief_layers[0].id()})")
+else:
+    print("  WARNING: relief layer not found — base map not configured")
+
+aoi = hlavna.extent()
+aoi.grow(500)
+project.writeEntry("QFieldSync", "areaOfInterest",     aoi.asWktPolygon())
+project.writeEntry("QFieldSync", "areaOfInterestCrs",  hlavna.crs().authid())
+project.writeEntry("QFieldSync", "offlineCopyOnlyAoi", 1)
+print(f"  AOI: {aoi.toString(0)} ({hlavna.crs().authid()})")
 
 # ── save project ───────────────────────────────────────────────────────────────
 
