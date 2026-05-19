@@ -19,8 +19,10 @@ from qgis.core import (
     QgsPalLayerSettings,
     QgsVectorLayerSimpleLabeling,
     QgsTextFormat,
+    QgsTextBufferSettings,
     QgsProperty,
 )
+from qgis.PyQt.QtGui import QColor
 
 project   = QgsProject.instance()
 gpkg_path = project.homePath() + "/MapovaniePrePS.gpkg"
@@ -545,12 +547,18 @@ print(f"  AOI: {aoi.toString(0)} ({hlavna.crs().authid()})")
 print("\n=== Label styling for tblHabHlavna ===")
 
 pal = QgsPalLayerSettings()
-pal.fieldName = '"RECORDID" || \' – \' || "KOD_UEV"'
+pal.fieldName = '"RECORDID"'
 pal.isExpression = True
 pal.enabled = True
 
+buf = QgsTextBufferSettings()
+buf.setEnabled(True)
+buf.setSize(1.0)
+buf.setColor(QColor("white"))
+
 fmt = QgsTextFormat()
 fmt.setSize(9)
+fmt.setBuffer(buf)
 
 dd = pal.dataDefinedProperties()
 dd.setProperty(
