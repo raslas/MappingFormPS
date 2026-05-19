@@ -2,7 +2,7 @@
 #
 # Run once in the QGIS Python console (Plugins > Python Console > open script).
 # Regenerates all widget, alias, default-value, and form-layout configuration
-# to exactly match the current SKUEV0257.qgs project state.
+# to exactly match the current MapovaciFormularPS.qgs project state.
 
 from qgis.core import (
     QgsProject,
@@ -16,10 +16,14 @@ from qgis.core import (
     QgsDefaultValue,
     QgsOptionalExpression,
     QgsExpression,
+    QgsPalLayerSettings,
+    QgsVectorLayerSimpleLabeling,
+    QgsTextFormat,
+    QgsProperty,
 )
 
 project   = QgsProject.instance()
-gpkg_path = project.homePath() + "/SKUEV0257.gpkg"
+gpkg_path = project.homePath() + "/MapovaniePrePS.gpkg"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -262,7 +266,7 @@ root_h.addChildElement(t_bio)
 # ── Tabs: Druhy and Aktivity (type A only, not linked forms) ──
 _VIS_A = " (\"typ_polygon\" = 'A') AND (\"polygon_id_form\" is null)"
 
-t_druhy = make_container(root_h, "Druhy", "tab", visibility=_VIS_A)
+t_druhy = make_container(root_h, "Druhy", "tab", visibility="True") #_VIS_A)
 if r_druhy:
     t_druhy.addChildElement(make_rel_editor(
         "r_hlavna_druhy", r_druhy, t_druhy,
@@ -319,10 +323,12 @@ for f, a in {
 set_widget(biotopy, "biotop_cislo", "ValueRelation", {
     "Layer": lkp_biotop.id(), "Key": "code", "Value": "biotop_name",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
+    "CompleterMatchFlags": 1,
 })
 set_widget(biotopy, "biotop_cislo_new", "ValueRelation", {
     "Layer": lkp_biotop_new.id(), "Key": "codenew", "Value": "biotopnew_name",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
+    "CompleterMatchFlags": 1,
 })
 set_widget(biotopy, "biotop_pokryv", "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_default(biotopy, "biotop_pokryv", "100")
@@ -386,8 +392,9 @@ for f, a in {
     set_alias(opatrenia, f, a)
 
 set_widget(opatrenia, "kod_opatrenia", "ValueRelation", {
-    "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "name",
+    "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "namex",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
+    "CompleterMatchFlags": 1,
 })
 set_widget(opatrenia, "detailny_opis_opatrenia",   "TextEdit", {"IsMultiline": True,  "UseHtml": False})
 set_widget(opatrenia, "percento_z_plochy_biotopu", "TextEdit", {"IsMultiline": False, "UseHtml": False})
@@ -409,8 +416,9 @@ for f, a in {
     set_alias(aktivity, f, a)
 
 set_widget(aktivity, "Aktivita", "ValueRelation", {
-    "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "name",
+    "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "namex",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
+    "CompleterMatchFlags": 1,
 })
 set_widget(aktivity, "Intenzita", "ValueMap", {
     "map": {"A – vysoká": "A", "B – stredná": "B", "C – nízka": "C"},
@@ -432,7 +440,7 @@ set_hidden(druhy, "is_characetristic")
 for f, a in {
     "KOD":             "Druh (výber zo zoznamu)",
     "NAZOV_LAT":       "Latinský názov (auto)",
-    "KOD_KB":          "Kód KB",
+    "kod_kbx":         "Kód KB",
     "POKRYVNOST":      "Pokryvnosť",
     "etaz":            "Etáž",
     "pokryvnost_perc": "Pokryvnosť (%)",
@@ -442,6 +450,7 @@ for f, a in {
 set_widget(druhy, "KOD", "ValueRelation", {
     "Layer": lkp_druhy.id(), "Key": "Tax_id", "Value": "Taxon_meno",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": True,
+    "CompleterMatchFlags": 1,
 })
 # NAZOV_LAT: read-only, auto-filled from species lookup on every save
 set_read_only(druhy, "NAZOV_LAT")
@@ -452,6 +461,7 @@ set_default(druhy, "NAZOV_LAT",
 set_widget(druhy, "POKRYVNOST", "ValueMap", {
     "map": {"1": "1", "2a": "2a", "2b": "2b", "3": "3"},
 })
+set_default(druhy, "POKRYVNOST", "'1'")
 set_widget(druhy, "etaz", "ValueMap", {
     "map": {"E0": "E0", "E1": "E1", "E2": "E2", "E3": "E3"},
 })
@@ -498,10 +508,10 @@ for layer, action in {
     layer.setCustomProperty("QFieldSync/action", action)
     print(f"  {layer.name()}: {action}")
 
-hlavna.setDisplayExpression('"RECORDID" || \' – \' || "KOD_UEV"')
-biotopy.setDisplayExpression('"biotop_cislo"')
-druhy.setDisplayExpression('"NAZOV_LAT"')
-aktivity.setDisplayExpression('"Aktivita"')
+hlavna.setDisplayExpression('"RECORDID" || \' – \' || "podlaorta" || \' – \' || "datum"')
+biotopy.setDisplayExpression('"biotop_cislo" || \' – \' || "biotop_pokryv"')
+druhy.setDisplayExpression('"NAZOV_LAT" || \' – \' || "etaz" || \' – \' || "POKRYVNOST"')
+aktivity.setDisplayExpression('"Aktivita" || \' – \' || "Perc_Plochy"')
 print("  display expressions set")
 
 root = project.layerTreeRoot()
@@ -529,6 +539,38 @@ project.writeEntry("QFieldSync", "areaOfInterest",     aoi.asWktPolygon())
 project.writeEntry("QFieldSync", "areaOfInterestCrs",  hlavna.crs().authid())
 project.writeEntry("QFieldSync", "offlineCopyOnlyAoi", 1)
 print(f"  AOI: {aoi.toString(0)} ({hlavna.crs().authid()})")
+
+# ── label styling for tblHabHlavna ────────────────────────────────────────────
+
+print("\n=== Label styling for tblHabHlavna ===")
+
+pal = QgsPalLayerSettings()
+pal.fieldName = '"RECORDID" || \' – \' || "KOD_UEV"'
+pal.isExpression = True
+pal.enabled = True
+
+fmt = QgsTextFormat()
+fmt.setSize(9)
+
+dd = pal.dataDefinedProperties()
+dd.setProperty(
+    QgsPalLayerSettings.Color,
+    QgsProperty.fromExpression(
+        "if(\"typ_polygon\" IS NOT NULL, '#ff0000', '#000000')"
+    ),
+)
+dd.setProperty(
+    QgsPalLayerSettings.Size,
+    QgsProperty.fromExpression(
+        "if(\"typ_polygon\" IS NOT NULL, 7, 9)"
+    ),
+)
+pal.setDataDefinedProperties(dd)
+pal.setFormat(fmt)
+
+hlavna.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+hlavna.setLabelsEnabled(True)
+print("  label styling set")
 
 # ── save project ───────────────────────────────────────────────────────────────
 
