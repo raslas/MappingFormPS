@@ -5,3 +5,4 @@
 !.gitignore
 !configure_forms.py
 !MappingFormPS.qgz
+!upload_to_qfieldcloud.py

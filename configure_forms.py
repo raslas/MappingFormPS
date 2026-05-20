@@ -118,7 +118,6 @@ biotopy        = get_or_load_layer("tblHabBiotopy")
 opatrenia      = get_or_load_layer("tblHabBiotopyOpatrenia")
 druhy          = get_or_load_layer("tblHabDruhy")
 aktivity       = get_or_load_layer("tblAktivity")
-fotky          = get_or_load_layer("tblHabFotky")
 lkp_aktivita   = get_or_load_layer("tblAktivityLookup")
 lkp_druhy      = get_or_load_layer("tblHabDruhyLookup")
 lkp_biotop     = get_or_load_layer("tblHabBiotopyLookup")
@@ -147,20 +146,19 @@ def make_relation(rel_id, name, parent_layer, parent_field, child_layer, child_f
     print(f"  OK: {name}")
     return r
 
-r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",   hlavna,  "RECORDID", biotopy,   "fkRECORDID")
-r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",     hlavna,  "RECORDID", druhy,     "fkRECORDID")
-r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",  hlavna,  "RECORDID", aktivity,  "fkRECORDID")
-r_fotky     = make_relation("r_hlavna_fotky",      "Fotky",     hlavna,  "RECORDID", fotky,     "fkRECORDID")
-r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia", biotopy, "id",       opatrenia, "fkHabBiotopyID")
+r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",   hlavna,  "fid", biotopy,   "fkRECORDID")
+r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",     hlavna,  "fid", druhy,     "fkRECORDID")
+r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",  hlavna,  "fid", aktivity,  "fkRECORDID")
+r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia", biotopy, "id", opatrenia, "fkHabBiotopyID")
 
 # ── tblHabHlavna ───────────────────────────────────────────────────────────────
 
 print("\n=== tblHabHlavna ===")
 
 set_hidden(hlavna, "fid")
-set_hidden(hlavna, "polygon_id")
+set_hidden(hlavna, "RECORDID")
 
-for f in ["KOD_UEV", "RECORDID", "p", "podlaorta"]:
+for f in ["KOD_UEV", "polygon_id", "p", "podlaorta"]:
     set_read_only(hlavna, f)
 
 for f, a in {
@@ -168,7 +166,7 @@ for f, a in {
     "podlaorta":        "Podľa orta",
     "poznamka":         "Poznámka",
     "p":                "Plocha (m²)",
-    "RECORDID":         "ID záznamu",
+    "polygon_id":       "ID polygónu",
     "datum":            "Dátum",
     "lokalita":         "Lokalita",
     "hlavny_mapovatel": "Mapovateľ",
@@ -194,7 +192,7 @@ set_widget(hlavna, "datum", "DateTime", {
     "field_iso_format":       False,
 })
 set_widget(hlavna, "KOD_UEV",          "TextEdit", {"IsMultiline": False, "UseHtml": False})
-set_widget(hlavna, "RECORDID",         "TextEdit", {"IsMultiline": False, "UseHtml": False})
+set_widget(hlavna, "polygon_id",       "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_widget(hlavna, "hlavny_mapovatel", "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_widget(hlavna, "druhy_mapovatel",  "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_widget(hlavna, "poznamka",         "TextEdit", {"IsMultiline": True,  "UseHtml": False})
@@ -223,7 +221,7 @@ add_field(t_zak, hlavna, "polygon_id_form")
 # Unnamed 2-column GroupBox — hidden when polygon_id_form is filled (linked form)
 grp_ids = make_container(t_zak, "", "groupbox", cols=2,
                          visibility='"polygon_id_form" is null')
-for f in ["RECORDID", "podlaorta", "p", "datum", "lokalita", "hlavny_mapovatel"]:
+for f in ["polygon_id", "podlaorta", "p", "datum", "lokalita", "hlavny_mapovatel"]:
     add_field(grp_ids, hlavna, f)
 t_zak.addChildElement(grp_ids)
 
@@ -283,17 +281,6 @@ if r_aktivity:
     t_akt.addChildElement(make_rel_editor("r_hlavna_aktivity", r_aktivity, t_akt))
 root_h.addChildElement(t_akt)
 
-# ── Tab: Fotky (permanently hidden — photos handled outside QFieldCloud) ──
-t_fotky = make_container(root_h, "Fotky", "tab", visibility="false")
-if r_fotky:
-    t_fotky.addChildElement(make_rel_editor(
-        "r_hlavna_fotky", r_fotky, t_fotky,
-        extra_cfg={"allow_add_child_feature_with_no_geometry": False,
-                   "show_first_feature": True},
-        widget_type_id="relation_editor",
-    ))
-root_h.addChildElement(t_fotky)
-
 hlavna.setEditFormConfig(cfg_h)
 
 # ── tblHabBiotopy ──────────────────────────────────────────────────────────────
@@ -349,7 +336,7 @@ root_b.clear()
 
 # Kvalita/Manažment/Vyhliadky hidden for type-B polygons (no quality assessment needed)
 _VIS_NOT_B = (
-    "attribute(get_feature('tblHabHlavna', 'RECORDID', \"fkRECORDID\"), 'typ_polygon') != 'B'"
+    "attribute(get_feature('tblHabHlavna', 'polygon_id', \"fkRECORDID\"), 'typ_polygon') != 'B'"
 )
 
 grp_bio = make_container(root_b, "Biotop")
@@ -471,26 +458,6 @@ set_default(druhy, "etaz", "'E1'")
 set_widget(druhy, "pokryvnost_perc", "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_default(druhy, "pokryvnost_perc", "0")
 
-# ── tblHabFotky ────────────────────────────────────────────────────────────────
-
-print("\n=== tblHabFotky ===")
-
-set_hidden(fotky, "fid")
-set_hidden(fotky, "fkRECORDID")
-set_alias(fotky, "fotoFileName", "Názov súboru")
-
-# QField captures photos with the camera; filenames stored relative to project folder.
-# Photos are NOT synced via QFieldCloud — transferred separately.
-set_widget(fotky, "fotoFileName", "ExternalResource", {
-    "DocumentViewer":   2,
-    "FileWidgetFilter": "Images (*.jpg *.jpeg *.png *.JPG *.JPEG *.PNG)",
-    "FullUrl":          False,
-    "PropertyCollection": {},
-    "RelativeStorage":  1,
-    "StorageMode":      1,
-    "UseLink":          False,
-})
-
 # ── QFieldSync / QFieldCloud configuration ─────────────────────────────────────
 
 print("\n=== QFieldSync configuration ===")
@@ -501,7 +468,6 @@ for layer, action in {
     opatrenia:      "offline",
     druhy:          "offline",
     aktivity:       "offline",
-    fotky:          "offline",
     lkp_aktivita:   "copy",
     lkp_druhy:      "copy",
     lkp_biotop:     "copy",
@@ -510,7 +476,7 @@ for layer, action in {
     layer.setCustomProperty("QFieldSync/action", action)
     print(f"  {layer.name()}: {action}")
 
-hlavna.setDisplayExpression('"RECORDID" || \' – \' || "podlaorta" || \' – \' || "datum"')
+hlavna.setDisplayExpression('"polygon_id" || \' – \' || "podlaorta" || \' – \' || "datum"')
 biotopy.setDisplayExpression('"biotop_cislo" || \' – \' || "biotop_pokryv"')
 druhy.setDisplayExpression('"NAZOV_LAT" || \' – \' || "etaz" || \' – \' || "POKRYVNOST"')
 aktivity.setDisplayExpression('"Aktivita" || \' – \' || "Perc_Plochy"')
@@ -547,7 +513,7 @@ print(f"  AOI: {aoi.toString(0)} ({hlavna.crs().authid()})")
 print("\n=== Label styling for tblHabHlavna ===")
 
 pal = QgsPalLayerSettings()
-pal.fieldName = '"RECORDID"'
+pal.fieldName = '"polygon_id"'
 pal.isExpression = True
 pal.enabled = True
 
