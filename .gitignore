@@ -6,3 +6,4 @@
 !configure_forms.py
 !MappingFormPS.qgz
 !upload_to_qfieldcloud.py
+!export_qfieldcloud_projects.py
