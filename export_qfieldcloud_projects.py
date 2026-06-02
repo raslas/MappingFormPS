@@ -1,8 +1,12 @@
 """
 export_qfieldcloud_projects.py
 
-Fetches all QFieldCloud projects (owned by the authenticated user) together
-with their collaborators and writes the result to an Excel file.
+Fetches all QFieldCloud projects owned by the authenticated user and writes
+them to an Excel file.
+
+NOTE: The QFieldCloud public API (v1) exposes only /projects/ and /jobs/.
+There is no collaborators endpoint — that information is only available
+through the web UI.
 
 Requirements:
     pip install requests python-dotenv openpyxl
@@ -39,15 +43,19 @@ USERNAME = os.environ.get("QFIELDCLOUD_USERNAME", "")
 PASSWORD = os.environ.get("QFIELDCLOUD_PASSWORD", "")
 OUTPUT   = Path(__file__).parent / "qfieldcloud_projects.xlsx"
 
+COLUMNS = [
+    ("name",        "Project name",  25),
+    ("description", "Description",   35),
+    ("is_public",   "Public",        10),
+    ("status",      "Status",        12),
+    ("user_role",   "Your role",     15),
+    ("created_at",  "Created",       20),
+    ("updated_at",  "Updated",       20),
+]
+
 
 def auth_headers(token: str) -> dict:
     return {"Authorization": f"token {token}"}
-
-
-def api_get(token: str, path: str) -> dict | list:
-    r = requests.get(f"{BASE_URL}{path}", headers=auth_headers(token))
-    r.raise_for_status()
-    return r.json()
 
 
 def login() -> tuple[str, str]:
@@ -55,7 +63,6 @@ def login() -> tuple[str, str]:
         raise RuntimeError("QFIELDCLOUD_USERNAME not set in .env")
     if not PASSWORD:
         raise RuntimeError("QFIELDCLOUD_PASSWORD not set in .env")
-
     r = requests.post(f"{BASE_URL}/auth/login/", json={"username": USERNAME, "password": PASSWORD})
     if r.status_code != 200:
         raise RuntimeError(f"Login failed [{r.status_code}]: {r.text}")
@@ -64,66 +71,16 @@ def login() -> tuple[str, str]:
     return data["token"], data["username"]
 
 
-def discover_api_endpoints(token: str) -> None:
-    """Print the API root response to reveal registered endpoints."""
-    r = requests.get(f"{BASE_URL}/", headers=auth_headers(token))
-    print(f"\n=== API root [{r.status_code}] ===")
-    if r.ok:
-        try:
-            import json
-            print(json.dumps(r.json(), indent=2))
-        except Exception:
-            print(r.text[:1000])
-    else:
-        print(r.text[:500])
-    print("=" * 40)
-
-
-def get_collaborators(token: str, owner: str, project_name: str) -> list[str]:
-    """Return a list of collaborator usernames for a project."""
-    candidates = [
-        f"/projects/{owner}/{project_name}/collaborators/",
-        f"/collaborators/?project={owner}/{project_name}",
-        f"/projects/{owner}/{project_name}/members/",
-    ]
-    for path in candidates:
-        r = requests.get(f"{BASE_URL}{path}", headers=auth_headers(token))
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("results", data) if isinstance(data, dict) else data
-            names = []
-            for item in items:
-                if "collaborator" in item:
-                    names.append(item["collaborator"])
-                elif "member" in item and isinstance(item["member"], dict):
-                    names.append(item["member"].get("username", ""))
-                elif "username" in item:
-                    names.append(item["username"])
-            return [n for n in names if n]
-        if r.status_code not in (404, 405):
-            print(f"    WARNING: {path} → [{r.status_code}] {r.text[:200]}")
-    return []
-
-
 def main() -> None:
     print("Logging in...")
     token, username = login()
 
-    discover_api_endpoints(token)
-
     print("\nFetching projects...")
-    all_projects = api_get(token, "/projects/")
-    # Filter to projects owned by the authenticated user
+    r = requests.get(f"{BASE_URL}/projects/", headers=auth_headers(token))
+    r.raise_for_status()
+    all_projects = r.json()
     projects = [p for p in all_projects if p.get("owner") == username]
     print(f"  Found {len(projects)} project(s) owned by '{username}'")
-
-    rows: list[tuple[str, str]] = []
-    for p in projects:
-        name = p.get("name", "")
-        print(f"  {name}...", end=" ", flush=True)
-        collaborators = get_collaborators(token, username, name)
-        print(f"{len(collaborators)} collaborator(s)")
-        rows.append((name, ", ".join(collaborators)))
 
     # ── Write Excel ───────────────────────────────────────────────────────────
     wb = openpyxl.Workbook()
@@ -134,23 +91,28 @@ def main() -> None:
     header_fill  = PatternFill("solid", fgColor="1F4E79")
     center_align = Alignment(vertical="center", wrap_text=True)
 
-    headers = ["Project name", "Collaborators"]
-    for col, h in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col, value=h)
+    for col, (_, label, width) in enumerate(COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col, value=label)
         cell.font      = header_font
         cell.fill      = header_fill
         cell.alignment = center_align
+        ws.column_dimensions[cell.column_letter].width = width
 
-    for row_idx, (name, collabs) in enumerate(rows, start=2):
-        ws.cell(row=row_idx, column=1, value=name).alignment  = center_align
-        ws.cell(row=row_idx, column=2, value=collabs).alignment = center_align
+    for row_idx, p in enumerate(projects, start=2):
+        for col, (field, _, _) in enumerate(COLUMNS, start=1):
+            value = p.get(field, "")
+            # Trim datetime to date only
+            if isinstance(value, str) and "T" in value:
+                value = value[:10]
+            ws.cell(row=row_idx, column=col, value=value).alignment = center_align
 
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 60
     ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
 
     wb.save(OUTPUT)
-    print(f"\nSaved: {OUTPUT}")
+    print(f"\nSaved: {OUTPUT}  ({len(projects)} rows)")
+    print("\nNote: collaborators are not exposed by the QFieldCloud REST API.")
+    print("      Manage them at https://app.qfield.cloud/")
 
 
 if __name__ == "__main__":
