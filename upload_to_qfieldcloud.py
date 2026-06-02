@@ -17,8 +17,8 @@ Usage:
 
 # ── Project name — change this to match your QFieldCloud project ───────────────
 
-CLOUD_PROJECT_NAME = "SKUEV0817"
-CLOUD_PROJECT_NAMEx = "Rimava a Slaná"
+CLOUD_PROJECT_NAME = "SKUEV0564"
+CLOUD_PROJECT_NAMEx = "Dubová"
 
 import os
 import sqlite3
@@ -318,7 +318,11 @@ def main() -> None:
     )
 
     if existing:
-        print(f"  Found: {existing['id']} — deleting...")
+        print(f"  Found: {existing['id']}")
+        answer = input(f"  Delete existing project '{CLOUD_PROJECT_NAME}' and continue? [yes/no]: ").strip().lower()
+        if answer not in ("yes", "y", "ok"):
+            print("  Aborted.")
+            return
         r = requests.delete(
             f"{BASE_URL}/projects/{existing['id']}/",
             headers=auth_headers(token),
