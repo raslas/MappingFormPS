@@ -66,12 +66,34 @@ def login() -> tuple[str, str]:
 
 def get_collaborators(token: str, project_id: str) -> list[str]:
     """Return a list of collaborator usernames for a project."""
-    try:
-        members = api_get(token, f"/projects/{project_id}/members/")
-        return [m["member"]["username"] for m in members if "member" in m]
-    except requests.HTTPError as e:
-        print(f"    WARNING: could not fetch members ({e})")
-        return []
+    candidates = [
+        f"/projects/{project_id}/collaborators/",
+        f"/projects/{project_id}/members/",
+        f"/collaborators/?project={project_id}",
+    ]
+    for path in candidates:
+        r = requests.get(f"{BASE_URL}{path}", headers=auth_headers(token))
+        if r.status_code == 200:
+            data = r.json()
+            # Handle both list-of-objects and paginated {"results": [...]} shapes
+            items = data.get("results", data) if isinstance(data, dict) else data
+            # Try common username field locations
+            names = []
+            for item in items:
+                if "collaborator" in item:
+                    names.append(item["collaborator"])
+                elif "member" in item and isinstance(item["member"], dict):
+                    names.append(item["member"].get("username", ""))
+                elif "username" in item:
+                    names.append(item["username"])
+            return [n for n in names if n]
+        if r.status_code != 404:
+            # Unexpected error — surface it
+            print(f"    WARNING: {path} → [{r.status_code}] {r.text[:200]}")
+    # All candidates returned 404 — print one response body to aid diagnosis
+    r = requests.get(f"{BASE_URL}/projects/{project_id}/", headers=auth_headers(token))
+    print(f"    WARNING: no collaborator endpoint found. Project detail keys: {list(r.json().keys()) if r.ok else r.text[:200]}")
+    return []
 
 
 def main() -> None:
