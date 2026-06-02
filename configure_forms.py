@@ -24,18 +24,20 @@ from qgis.core import (
 )
 from qgis.PyQt.QtGui import QColor
 
-project   = QgsProject.instance()
-gpkg_path = project.homePath() + "/MapovaniePrePS.gpkg"
+project          = QgsProject.instance()
+gpkg_path        = project.homePath() + "/MapovaniePrePS.gpkg"
+aktlkp_gpkg_path = project.homePath() + "/AktivityLookup.gpkg"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def get_or_load_layer(name):
+def get_or_load_layer(name, source_gpkg=None):
     layers = project.mapLayersByName(name)
     if layers:
         return layers[0]
-    layer = QgsVectorLayer(f"{gpkg_path}|layername={name}", name, "ogr")
+    path = source_gpkg or gpkg_path
+    layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
     if not layer.isValid():
-        raise RuntimeError(f"Cannot load layer '{name}' from {gpkg_path}")
+        raise RuntimeError(f"Cannot load layer '{name}' from {path}")
     project.addMapLayer(layer)
     print(f"  + loaded layer: {name}")
     return layer
@@ -118,7 +120,8 @@ biotopy        = get_or_load_layer("tblHabBiotopy")
 opatrenia      = get_or_load_layer("tblHabBiotopyOpatrenia")
 druhy          = get_or_load_layer("tblHabDruhy")
 aktivity       = get_or_load_layer("tblAktivity")
-lkp_aktivita   = get_or_load_layer("tblAktivityLookup")
+lkp_aktivita     = get_or_load_layer("tblAktivityLookup")
+lkp_aktivita_new = get_or_load_layer("AktivityLookup", aktlkp_gpkg_path)
 lkp_druhy      = get_or_load_layer("tblHabDruhyLookup")
 lkp_biotop     = get_or_load_layer("tblHabBiotopyLookup")
 lkp_biotop_new = get_or_load_layer("tblHabBiotopyNewLookup")
@@ -405,7 +408,7 @@ for f, a in {
     set_alias(aktivity, f, a)
 
 set_widget(aktivity, "Aktivita", "ValueRelation", {
-    "Layer": lkp_aktivita.id(), "Key": "node_code", "Value": "namex",
+    "Layer": lkp_aktivita_new.id(), "Key": "kod", "Value": "namex",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
     "CompleterMatchFlags": 1,
 })
@@ -468,10 +471,11 @@ for layer, action in {
     opatrenia:      "offline",
     druhy:          "offline",
     aktivity:       "offline",
-    lkp_aktivita:   "copy",
-    lkp_druhy:      "copy",
-    lkp_biotop:     "copy",
-    lkp_biotop_new: "copy",
+    lkp_aktivita:     "copy",
+    lkp_aktivita_new: "copy",
+    lkp_druhy:        "copy",
+    lkp_biotop:       "copy",
+    lkp_biotop_new:   "copy",
 }.items():
     layer.setCustomProperty("QFieldSync/action", action)
     print(f"  {layer.name()}: {action}")
@@ -483,23 +487,11 @@ aktivity.setDisplayExpression('"Aktivita" || \' – \' || "Perc_Plochy"')
 print("  display expressions set")
 
 root = project.layerTreeRoot()
-for lyr in [lkp_aktivita, lkp_druhy, lkp_biotop, lkp_biotop_new]:
+for lyr in [lkp_aktivita, lkp_aktivita_new, lkp_druhy, lkp_biotop, lkp_biotop_new]:
     node = root.findLayer(lyr.id())
     if node:
         node.setItemVisibilityChecked(False)
         print(f"  hidden: {lyr.name()}")
-
-relief_layers = project.mapLayersByName("relief")
-if relief_layers:
-    project.writeEntry("QFieldSync", "createBaseMap",            1)
-    project.writeEntry("QFieldSync", "baseMapType",              "singleLayer")
-    project.writeEntry("QFieldSync", "baseMapLayer",             relief_layers[0].id())
-    project.writeEntry("QFieldSync", "baseMapTileSize",          1024)
-    project.writeEntry("QFieldSync", "baseMapTilesMinZoomLevel", 8)
-    project.writeEntry("QFieldSync", "baseMapTilesMaxZoomLevel", 14)
-    print(f"  base map: relief ({relief_layers[0].id()})")
-else:
-    print("  WARNING: relief layer not found — base map not configured")
 
 aoi = hlavna.extent()
 aoi.grow(500)
