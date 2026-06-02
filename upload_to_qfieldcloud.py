@@ -17,11 +17,13 @@ Usage:
 
 # ── Project name — change this to match your QFieldCloud project ───────────────
 
-CLOUD_PROJECT_NAME = "SKUEV0870"
+CLOUD_PROJECT_NAME = "SKUEV0817"
+CLOUD_PROJECT_NAMEx = "Rimava a Slaná"
 
 import os
 import sqlite3
 import struct
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 try:
@@ -57,6 +59,7 @@ COPY_FIELDS  = ["KOD_UEV", "podlaorta", "polygon_id", "p"]
 FILES_TO_UPLOAD = [
     PROJECT_DIR / "MapovaciFormularPS.qgs",
     DEST_GPKG,
+    PROJECT_DIR / "AktivityLookup.gpkg",
 ]
 
 # ── GeoPackage helpers ─────────────────────────────────────────────────────────
@@ -88,13 +91,13 @@ def parse_gpkg_bbox(blob: bytes) -> tuple | None:
     return struct.unpack_from('<dddd', blob, 8)  # minx, maxx, miny, maxy
 
 
-def prepare_local_gpkg() -> int:
+def prepare_local_gpkg() -> tuple[int, tuple[float, float, float, float]]:
     """
     1. Clear all data tables in DEST_GPKG (lookup tables are preserved).
     2. Copy features from SOURCE_LAYER where KOD_UEV = CLOUD_PROJECT_NAME
        into TARGET_LAYER (geometry + COPY_FIELDS only).
     3. Rebuild the spatial R-tree index.
-    Returns the number of features inserted.
+    Returns (feature_count, (minx, miny, maxx, maxy)) of inserted features.
     """
     if not SOURCE_GPKG.exists():
         raise FileNotFoundError(f"Source GeoPackage not found: {SOURCE_GPKG}")
@@ -147,6 +150,12 @@ def prepare_local_gpkg() -> int:
             rows,
         )
 
+        # Populate RECORDID from fid — RECORDID is the stable parent key used by
+        # child-table relations; fid is only known after the INSERT.
+        conn.execute(
+            f'UPDATE "{TARGET_LAYER}" SET "RECORDID" = fid WHERE "RECORDID" IS NULL'
+        )
+
         # Rebuild R-tree spatial index from geometry blob headers
         conn.execute(f'DELETE FROM "{rtree_table}"')
         inserted = conn.execute(
@@ -174,8 +183,66 @@ def prepare_local_gpkg() -> int:
     with sqlite3.connect(str(DEST_GPKG)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    # Compute overall bounding box from R-tree entries (minx, maxx, miny, maxy per entry)
+    all_minx = min(e[1] for e in rtree_entries)
+    all_miny = min(e[3] for e in rtree_entries)
+    all_maxx = max(e[2] for e in rtree_entries)
+    all_maxy = max(e[4] for e in rtree_entries)
+    overall_bbox = (all_minx, all_miny, all_maxx, all_maxy)
+
     print(f"  Inserted {len(rows)} features, rebuilt spatial index ({len(rtree_entries)} entries).")
-    return len(rows)
+    return len(rows), overall_bbox
+
+
+# ── QGS project helpers ────────────────────────────────────────────────────────
+
+QGS_PADDING = 0.05  # 5 % padding around the AOI bbox
+
+def update_qgs_extent(
+    qgs_path: Path,
+    minx: float, miny: float,
+    maxx: float, maxy: float,
+) -> None:
+    """
+    Set the <mapcanvas name="theMapCanvas"><extent> in the .qgs file to the
+    supplied bbox, with QGS_PADDING applied on all sides.
+    The file is edited in-place; the XML declaration and all formatting are
+    preserved by writing the modified text back directly.
+    """
+    dx = (maxx - minx) * QGS_PADDING
+    dy = (maxy - miny) * QGS_PADDING
+    padded = (minx - dx, miny - dy, maxx + dx, maxy + dy)
+
+    text = qgs_path.read_text(encoding="utf-8")
+    tree = ET.fromstring(text)
+
+    canvas = next(
+        (el for el in tree.iter("mapcanvas") if el.get("name") == "theMapCanvas"),
+        None,
+    )
+    if canvas is None:
+        raise RuntimeError("Could not find <mapcanvas name='theMapCanvas'> in .qgs file")
+
+    extent = canvas.find("extent")
+    if extent is None:
+        raise RuntimeError("<extent> element missing inside <mapcanvas>")
+
+    for tag, val in zip(("xmin", "ymin", "xmax", "ymax"), padded):
+        el = extent.find(tag)
+        if el is None:
+            raise RuntimeError(f"<{tag}> missing inside <mapcanvas><extent>")
+        el.text = f"{val:.3f}"
+
+    # Write back using the same approach as QGIS: keep the original XML declaration
+    ET.indent(tree, space="  ")
+    qgs_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(tree, encoding="unicode"),
+        encoding="utf-8",
+    )
+    print(
+        f"  Map canvas extent updated: "
+        f"({padded[0]:.1f}, {padded[1]:.1f}) → ({padded[2]:.1f}, {padded[3]:.1f})"
+    )
 
 
 # ── QFieldCloud API helpers ────────────────────────────────────────────────────
@@ -222,7 +289,12 @@ def main() -> None:
         raise FileNotFoundError("Missing files:\n" + "\n".join(str(p) for p in missing))
 
     # ── Prepare local GeoPackage ──────────────────────────────────────────────
-    prepare_local_gpkg()
+    _, bbox = prepare_local_gpkg()
+
+    # ── Set area of interest in the QGIS project file ────────────────────────
+    qgs_path = PROJECT_DIR / "MapovaciFormularPS.qgs"
+    print(f"\nUpdating area of interest in {qgs_path.name}...")
+    update_qgs_extent(qgs_path, *bbox)
 
     # ── Authenticate ─────────────────────────────────────────────────────────
     print(f"\nLogging in as {USERNAME}...")
@@ -262,8 +334,8 @@ def main() -> None:
     p = api_post(token, "/projects/", {
         "name":        CLOUD_PROJECT_NAME,
         "owner":       username,
-        "description": "Habitat mapping field forms (PS)",
-        "is_public":   False,
+        "description": CLOUD_PROJECT_NAMEx,
+        "is_public":   True,
     })
     project_id = p["id"]
     print(f"  Created: {project_id}")
