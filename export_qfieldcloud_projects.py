@@ -64,6 +64,21 @@ def login() -> tuple[str, str]:
     return data["token"], data["username"]
 
 
+def discover_api_endpoints(token: str) -> None:
+    """Print the API root response to reveal registered endpoints."""
+    r = requests.get(f"{BASE_URL}/", headers=auth_headers(token))
+    print(f"\n=== API root [{r.status_code}] ===")
+    if r.ok:
+        try:
+            import json
+            print(json.dumps(r.json(), indent=2))
+        except Exception:
+            print(r.text[:1000])
+    else:
+        print(r.text[:500])
+    print("=" * 40)
+
+
 def get_collaborators(token: str, owner: str, project_name: str) -> list[str]:
     """Return a list of collaborator usernames for a project."""
     candidates = [
@@ -85,17 +100,16 @@ def get_collaborators(token: str, owner: str, project_name: str) -> list[str]:
                 elif "username" in item:
                     names.append(item["username"])
             return [n for n in names if n]
-        if r.status_code != 404:
+        if r.status_code not in (404, 405):
             print(f"    WARNING: {path} → [{r.status_code}] {r.text[:200]}")
-    # All candidates 404'd — print raw body of first candidate for diagnosis
-    r = requests.get(f"{BASE_URL}{candidates[0]}", headers=auth_headers(token))
-    print(f"    WARNING: no collaborator endpoint found [{r.status_code}]: {r.text[:300]}")
     return []
 
 
 def main() -> None:
     print("Logging in...")
     token, username = login()
+
+    discover_api_endpoints(token)
 
     print("\nFetching projects...")
     all_projects = api_get(token, "/projects/")
