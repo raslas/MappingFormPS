@@ -1,15 +1,15 @@
 """
 check_cloud_changes.py
 
-Reports whether each local QField project folder differs from its QFieldCloud
-counterpart. READ-ONLY: it never uploads, downloads, or syncs anything — it only
-prints a comparison report.
+Reports which local QField project folders have a modified MapovaniePrePS.gpkg
+file in their QFieldCloud counterpart. READ-ONLY: it never uploads, downloads,
+or syncs anything — it only prints a comparison report.
 
 Only folders under CLOUD_ROOT whose name starts with "SKUEV" (capitals) are
 checked. Each folder name is treated as the QFieldCloud project name.
 
 For every file it compares the local MD5 against the cloud md5sum and classifies
-it as:
+it internally as:
     =  in sync       (same MD5 on both sides)
     ~  modified       (present on both sides, different MD5)
     +  local only     (exists locally, not in cloud  -> would be uploaded)
@@ -23,7 +23,7 @@ Credentials are loaded from .env in the same directory as this script:
     QFIELDCLOUD_PASSWORD=...
 
 Usage:
-    python check_cloud_changes.py
+    python 01_check_cloud_changes.py
 """
 
 import hashlib
@@ -47,6 +47,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 CLOUD_ROOT = Path(r"C:\Users\RASLAS\QField\cloud")
 FOLDER_PREFIX = "SKUEV"                       # only folders starting with this (case-sensitive)
+TARGET_FILE = "MapovaniePrePS.gpkg"           # only report folders where this file is modified
 API_URL  = "https://app.qfield.cloud/api/v1/"
 USERNAME = os.environ.get("QFIELDCLOUD_USERNAME", "")
 PASSWORD = os.environ.get("QFIELDCLOUD_PASSWORD", "")
@@ -142,9 +143,10 @@ def main() -> None:
             projects_by_name[proj["name"]] = proj
 
     print(f"Checking {len(folders)} folder(s) against QFieldCloud "
-          f"(prefix '{FOLDER_PREFIX}'). READ-ONLY report - nothing is synced.\n")
+          f"(prefix '{FOLDER_PREFIX}'). READ-ONLY report - nothing is synced.")
+    print(f"Reporting only folders where {TARGET_FILE} is modified.\n")
 
-    changed_projects: list[str] = []
+    target_modified_projects: list[str] = []
 
     for folder in folders:
         name = folder.name
@@ -152,49 +154,42 @@ def main() -> None:
 
         project = projects_by_name.get(name)
         if project is None:
-            print("  ! No matching project in QFieldCloud — local folder only.\n")
-            changed_projects.append(name)
+            print("  No matching project in QFieldCloud; skipped.\n")
             continue
 
         remote = client.list_remote_files(project["id"])
         result = compare(folder, remote)
 
-        n_changes = len(result["modified"]) + len(result["local_only"]) + len(result["cloud_only"])
-        if n_changes == 0:
-            print(f"  In sync ({len(result['in_sync'])} file(s) match).")
+        if TARGET_FILE in result["modified"]:
+            print(f"  ~ modified    {TARGET_FILE}")
+            target_modified_projects.append(name)
         else:
-            for name_ in result["modified"]:
-                print(f"  ~ modified    {name_}")
-            for name_ in result["local_only"]:
-                print(f"  + local only  {name_}")
-            for name_ in result["cloud_only"]:
-                print(f"  - cloud only  {name_}")
-            print(f"  {len(result['in_sync'])} in sync, {n_changes} change(s).")
-            changed_projects.append(name)
+            print(f"  {TARGET_FILE} is not modified.")
 
         last = project.get("data_last_updated_at") or "?"
         print(f"  cloud last updated: {last}\n")
 
     # ── Summary ────────────────────────────────────────────────────────────
     print("=" * 64)
-    if changed_projects:
-        print(f"{len(changed_projects)} of {len(folders)} folder(s) have differences:")
-        for name in changed_projects:
+    if target_modified_projects:
+        print(f"{len(target_modified_projects)} of {len(folders)} folder(s) have modified {TARGET_FILE}:")
+        for name in target_modified_projects:
             print(f"  - {name}")
     else:
-        print(f"All {len(folders)} folder(s) are in sync with QFieldCloud.")
+        print(f"No modified {TARGET_FILE} found in {len(folders)} checked folder(s).")
 
-    # Write the check timestamp, then the names of the differing folders
+    # Write the check timestamp, then the names of folders with a modified
+    # target file.
     # (one per line) to a sidecar file.
     out_path = Path(__file__).parent / "01_check_cloud_changes_differ.txt"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out_path.write_text(
         f"# checked: {timestamp}\n"
-        + "".join(f"{name}\n" for name in changed_projects),
+        + "".join(f"{name}\n" for name in target_modified_projects),
         encoding="utf-8",
     )
-    print(f"\nDiffering folder names written to: {out_path.name} "
-          f"({len(changed_projects)} folder(s))")
+    print(f"\nFolder names with modified {TARGET_FILE} written to: {out_path.name} "
+          f"({len(target_modified_projects)} folder(s))")
 
 
 if __name__ == "__main__":
