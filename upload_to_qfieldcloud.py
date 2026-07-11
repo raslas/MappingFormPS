@@ -17,8 +17,8 @@ Usage:
 
 # ── Project name — change this to match your QFieldCloud project ───────────────
 
-CLOUD_PROJECT_NAME = "SKUEV0564"
-CLOUD_PROJECT_NAMEx = "Dubová"
+CLOUD_PROJECT_NAME = "SKUEV0332"
+CLOUD_PROJECT_NAMEx = "Čergov"
 
 import os
 import sqlite3
