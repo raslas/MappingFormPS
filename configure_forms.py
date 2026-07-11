@@ -27,6 +27,7 @@ from qgis.PyQt.QtGui import QColor
 project          = QgsProject.instance()
 gpkg_path        = project.homePath() + "/MapovaniePrePS.gpkg"
 aktlkp_gpkg_path = project.homePath() + "/AktivityLookup.gpkg"
+prevod_gpkg_path = project.homePath() + "/PrevodKatalogy.gpkg"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,7 @@ lkp_aktivita_new = get_or_load_layer("AktivityLookup", aktlkp_gpkg_path)
 lkp_druhy      = get_or_load_layer("tblHabDruhyLookup")
 lkp_biotop     = get_or_load_layer("tblHabBiotopyLookup")
 lkp_biotop_new = get_or_load_layer("tblHabBiotopyNewLookup")
+lkp_prevod     = get_or_load_layer("PrevodKatalogy", prevod_gpkg_path)
 
 # ── relations ──────────────────────────────────────────────────────────────────
 
@@ -149,9 +151,9 @@ def make_relation(rel_id, name, parent_layer, parent_field, child_layer, child_f
     print(f"  OK: {name}")
     return r
 
-r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",   hlavna,  "fid", biotopy,   "fkRECORDID")
-r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",     hlavna,  "fid", druhy,     "fkRECORDID")
-r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",  hlavna,  "fid", aktivity,  "fkRECORDID")
+r_biotopy   = make_relation("r_hlavna_biotopy",    "Biotopy",   hlavna,  "RECORDID", biotopy,   "fkRECORDID")
+r_druhy     = make_relation("r_hlavna_druhy",      "Druhy",     hlavna,  "RECORDID", druhy,     "fkRECORDID")
+r_aktivity  = make_relation("r_hlavna_aktivity",   "Aktivity",  hlavna,  "RECORDID", aktivity,  "fkRECORDID")
 r_opatrenia = make_relation("r_biotopy_opatrenia", "Opatrenia", biotopy, "id", opatrenia, "fkHabBiotopyID")
 
 # ── tblHabHlavna ───────────────────────────────────────────────────────────────
@@ -160,6 +162,10 @@ print("\n=== tblHabHlavna ===")
 
 set_hidden(hlavna, "fid")
 set_hidden(hlavna, "RECORDID")
+# Child-table relations need a parent key before the new polygon is saved.
+# The provider fid is only assigned after insert, so QField cannot use it while
+# the attribute form is still open.
+set_default(hlavna, "RECORDID", "to_int(format_date(now(), 'yyMMddHHmmsszzz')) * 1000 + rand(0, 999)")
 
 for f in ["KOD_UEV", "polygon_id", "p", "podlaorta"]:
     set_read_only(hlavna, f)
@@ -312,15 +318,21 @@ for f, a in {
 }.items():
     set_alias(biotopy, f, a)
 
+# PrevodKatalogy is a many-to-many conversion table: it has placeholder rows
+# ('-') where a biotope has no counterpart in the other catalogue, and codes
+# repeated on several rows. first_2002/first_2023 = 1 marks the first row of
+# each code — filtering on it keeps every dropdown entry unique.
 set_widget(biotopy, "biotop_cislo", "ValueRelation", {
-    "Layer": lkp_biotop.id(), "Key": "code", "Value": "biotop_name",
+    "Layer": lkp_prevod.id(), "Key": "kod_2002", "Value": "nazov_2002",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
     "CompleterMatchFlags": 1,
+    "FilterExpression": "\"first_2002\" = 1 AND \"kod_2002\" IS NOT NULL AND trim(\"kod_2002\") NOT IN ('', '-')",
 })
 set_widget(biotopy, "biotop_cislo_new", "ValueRelation", {
-    "Layer": lkp_biotop_new.id(), "Key": "codenew", "Value": "biotopnew_name",
+    "Layer": lkp_prevod.id(), "Key": "kod_2023", "Value": "nazov_2023",
     "AllowNull": True, "UseCompleter": True, "OrderByValue": False,
     "CompleterMatchFlags": 1,
+    "FilterExpression": "\"first_2023\" = 1 AND \"kod_2023\" IS NOT NULL AND trim(\"kod_2023\") NOT IN ('', '-')",
 })
 set_widget(biotopy, "biotop_pokryv", "TextEdit", {"IsMultiline": False, "UseHtml": False})
 set_default(biotopy, "biotop_pokryv", "100")
@@ -339,11 +351,11 @@ root_b.clear()
 
 # Kvalita/Manažment/Vyhliadky hidden for type-B polygons (no quality assessment needed)
 _VIS_NOT_B = (
-    "attribute(get_feature('tblHabHlavna', 'polygon_id', \"fkRECORDID\"), 'typ_polygon') != 'B'"
+    "attribute(get_feature('tblHabHlavna', 'RECORDID', \"fkRECORDID\"), 'typ_polygon') != 'B'"
 )
 
 grp_bio = make_container(root_b, "Biotop")
-for f in ["biotop_cislo", "biotop_pokryv", "biotop_cislo_new"]:
+for f in ["biotop_cislo_new", "biotop_pokryv", "biotop_cislo"]:
     add_field(grp_bio, biotopy, f)
 root_b.addChildElement(grp_bio)
 
@@ -476,6 +488,7 @@ for layer, action in {
     lkp_druhy:        "copy",
     lkp_biotop:       "copy",
     lkp_biotop_new:   "copy",
+    lkp_prevod:       "copy",
 }.items():
     layer.setCustomProperty("QFieldSync/action", action)
     print(f"  {layer.name()}: {action}")
@@ -487,7 +500,7 @@ aktivity.setDisplayExpression('"Aktivita" || \' – \' || "Perc_Plochy"')
 print("  display expressions set")
 
 root = project.layerTreeRoot()
-for lyr in [lkp_aktivita, lkp_aktivita_new, lkp_druhy, lkp_biotop, lkp_biotop_new]:
+for lyr in [lkp_aktivita, lkp_aktivita_new, lkp_druhy, lkp_biotop, lkp_biotop_new, lkp_prevod]:
     node = root.findLayer(lyr.id())
     if node:
         node.setItemVisibilityChecked(False)
