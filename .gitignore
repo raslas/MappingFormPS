@@ -9,3 +9,4 @@
 !export_qfieldcloud_projects.py
 !01_check_cloud_changes.py
 !02_sync_changed_gpkg.py
+!04_update_all_cloud_projects.py
