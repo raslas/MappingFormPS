@@ -70,6 +70,85 @@ def read_differ_folders(path: Path) -> list[str]:
     return names
 
 
+# ── Reusable download ────────────────────────────────────────────────────────
+
+def download_gpkg_for(folders, client=None, verbose=True):
+    """Download the latest TARGET_FILE for each folder name in `folders` from
+    QFieldCloud into CLOUD_ROOT/<name>, backing up the existing local copy to
+    .bak. Returns (downloaded, skipped) lists of folder names.
+
+    Non-interactive — callers (e.g. the export pipeline) do their own
+    confirmation. If `client` is None a new logged-in Client is created.
+    """
+    if not USERNAME or not PASSWORD:
+        raise RuntimeError("QFIELDCLOUD_USERNAME / QFIELDCLOUD_PASSWORD not set in .env")
+
+    if client is None:
+        if verbose:
+            print(f"Logging in as {USERNAME}...")
+        client = Client(url=API_URL)
+        client.login(USERNAME, PASSWORD)
+
+    # Build name -> project map. If a name is duplicated, prefer one owned by us.
+    projects_by_name: dict[str, dict] = {}
+    for proj in client.list_projects():
+        existing = projects_by_name.get(proj["name"])
+        if existing is None or proj["owner"] == USERNAME:
+            projects_by_name[proj["name"]] = proj
+
+    downloaded, skipped = [], []
+
+    for name in folders:
+        if verbose:
+            print(f"\n=== {name} ===")
+
+        project = projects_by_name.get(name)
+        if project is None:
+            if verbose:
+                print("  ! No matching project in QFieldCloud — skipped.")
+            skipped.append(name)
+            continue
+
+        local_folder = CLOUD_ROOT / name
+        if not local_folder.is_dir():
+            if verbose:
+                print(f"  ! Local folder not found: {local_folder} — skipped.")
+            skipped.append(name)
+            continue
+
+        remote = client.list_remote_files(project["id"])
+        if not any(f["name"] == TARGET_FILE for f in remote):
+            if verbose:
+                print(f"  ! '{TARGET_FILE}' not present in cloud project — skipped.")
+            skipped.append(name)
+            continue
+
+        # Back up the existing local file before overwriting.
+        local_path = local_folder / TARGET_FILE
+        if local_path.exists():
+            backup = local_path.with_suffix(local_path.suffix + ".bak")
+            shutil.copy2(local_path, backup)
+            if verbose:
+                print(f"  Backed up existing file -> {backup.name}")
+
+        if verbose:
+            print(f"  Downloading '{TARGET_FILE}'...", end=" ", flush=True)
+        client.download_file(
+            project["id"],
+            FileTransferType.PROJECT,
+            local_path,
+            Path(TARGET_FILE),
+            show_progress=False,
+            remote_etag=None,            # always fetch the cloud copy
+        )
+        size_mb = local_path.stat().st_size / 1_048_576
+        if verbose:
+            print(f"done ({size_mb:.1f} MB)")
+        downloaded.append(name)
+
+    return downloaded, skipped
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -91,59 +170,7 @@ def main() -> None:
         print("Aborted.")
         return
 
-    print(f"\nLogging in as {USERNAME}...")
-    client = Client(url=API_URL)
-    client.login(USERNAME, PASSWORD)
-
-    # Build name -> project map. If a name is duplicated, prefer one owned by us.
-    projects_by_name: dict[str, dict] = {}
-    for proj in client.list_projects():
-        existing = projects_by_name.get(proj["name"])
-        if existing is None or proj["owner"] == USERNAME:
-            projects_by_name[proj["name"]] = proj
-
-    downloaded, skipped = [], []
-
-    for name in folders:
-        print(f"\n=== {name} ===")
-
-        project = projects_by_name.get(name)
-        if project is None:
-            print("  ! No matching project in QFieldCloud — skipped.")
-            skipped.append(name)
-            continue
-
-        local_folder = CLOUD_ROOT / name
-        if not local_folder.is_dir():
-            print(f"  ! Local folder not found: {local_folder} — skipped.")
-            skipped.append(name)
-            continue
-
-        remote = client.list_remote_files(project["id"])
-        if not any(f["name"] == TARGET_FILE for f in remote):
-            print(f"  ! '{TARGET_FILE}' not present in cloud project — skipped.")
-            skipped.append(name)
-            continue
-
-        # Back up the existing local file before overwriting.
-        local_path = local_folder / TARGET_FILE
-        if local_path.exists():
-            backup = local_path.with_suffix(local_path.suffix + ".bak")
-            shutil.copy2(local_path, backup)
-            print(f"  Backed up existing file -> {backup.name}")
-
-        print(f"  Downloading '{TARGET_FILE}'...", end=" ", flush=True)
-        client.download_file(
-            project["id"],
-            FileTransferType.PROJECT,
-            local_path,
-            Path(TARGET_FILE),
-            show_progress=False,
-            remote_etag=None,            # always fetch the cloud copy
-        )
-        size_mb = local_path.stat().st_size / 1_048_576
-        print(f"done ({size_mb:.1f} MB)")
-        downloaded.append(name)
+    downloaded, skipped = download_gpkg_for(folders)
 
     # ── Summary ────────────────────────────────────────────────────────────
     print("\n" + "=" * 64)
