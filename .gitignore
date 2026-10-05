@@ -11,3 +11,9 @@
 !02_sync_changed_gpkg.py
 !03_update_cloud_qgs.py
 !04_update_all_cloud_projects.py
+!03_validacia.py
+!04_validacia_foto.py
+!05_export_shapefile.py
+!06_naplnenie_access.py
+!07_zip_for_SOP.py
+!08_web_hotovo.py
