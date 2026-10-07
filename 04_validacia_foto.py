@@ -13,6 +13,10 @@ C:\\Users\\RASLAS\\QField\\cloud\\SKUEV####\\f:
         štítok polygónu v QFielde (nie [polygon_id], ktoré sa môže opakovať).
   - ak názov súboru nezodpovedá žiadnemu RECORDID v tblHabHlavna, polygón
         sa skúsi určiť priestorovým prekryvom podľa GPS súradníc (geotagu)
+  - s parametrom --only-overlap sa názov súboru ignoruje: polygón sa určí
+        len prekryvom podľa geotagu a ak fotka neleží v žiadnom polygóne,
+        použije sa RECORDID najbližšieho polygónu
+        (napr. py 04_validacia_foto.py 0035 --only-overlap)
   - každý polygón z tblHabHlavna s prázdnym [polygon_id_form] musí mať aspoň
         jednu fotku v priečinku "f"; inak je to chyba
   - fotky sa nepremenúvajú, okrem zmeny formátu na JPEG
@@ -61,8 +65,8 @@ def is_empty(v):
     return v is None or (isinstance(v, str) and v.strip() == "")
 
 
-def ask_skuev():
-    raw = (sys.argv[1] if len(sys.argv) > 1
+def ask_skuev(args):
+    raw = (args[0] if args
            else input("Zadaj kód územia SKUEV (napr. SKUEV0862): ")).strip().upper()
     if re.fullmatch(r"\d{4}", raw):
         raw = "SKUEV" + raw
@@ -188,7 +192,14 @@ def letter_suffix(i):
 
 
 def main():
-    skuev = ask_skuev()
+    args = sys.argv[1:]
+    only_overlap = "--only-overlap" in args
+    args = [a for a in args if a != "--only-overlap"]
+    unknown = [a for a in args if a.startswith("--")]
+    if unknown:
+        sys.exit("Neznámy parameter: %s (povolený je len --only-overlap)."
+                 % ", ".join(unknown))
+    skuev = ask_skuev(args)
     folder = find_folder(skuev)
     foto_dir = os.path.join(folder, "f")
     if not os.path.isdir(foto_dir):
@@ -222,37 +233,54 @@ def main():
         images, converted = convert_to_jpeg(foto_dir, images, errors)
 
     for fn in images:
-        m = re.search(r"\d+", os.path.splitext(fn)[0])
-        if m:
-            rec = int(m.group(0))
-            if rec in valid_recs:
-                note_by_file[fn] = "polygon from filename"
-                assigned.setdefault(rec, []).append(fn)
-                continue
-            filename_note = "filename RECORDID %d not in tblHabHlavna" % rec
+        if only_overlap:
+            # názov súboru sa ignoruje, polygón sa určí len z geotagu
+            filename_note = "only-overlap mode"
+            why = ""
         else:
-            filename_note = "no polygon number in filename"
+            m = re.search(r"\d+", os.path.splitext(fn)[0])
+            if m:
+                rec = int(m.group(0))
+                if rec in valid_recs:
+                    note_by_file[fn] = "polygon from filename"
+                    assigned.setdefault(rec, []).append(fn)
+                    continue
+                filename_note = "filename RECORDID %d not in tblHabHlavna" % rec
+            else:
+                filename_note = "no polygon number in filename"
+            why = "názov nezodpovedá [RECORDID] a "
 
         path = os.path.join(foto_dir, fn)
         try:
             gps = read_gps(path)
         except Exception as e:
-            errors.append("%s: názov nezodpovedá [RECORDID] a obrázok sa nedá "
-                          "prečítať (%s)." % (fn, e))
+            errors.append("%s: %sobrázok sa nedá prečítať (%s)." % (fn, why, e))
             table_errors.append((fn, "%s; cannot read image (%s)" % (filename_note, e)))
             continue
         if gps is None:
-            errors.append("%s: názov nezodpovedá [RECORDID] a obrázok nemá GPS "
-                          "súradnice (geotag) – nedá sa určiť polygón." % fn)
+            errors.append("%s: %sobrázok nemá GPS súradnice (geotag) – nedá sa "
+                          "určiť polygón." % (fn, why))
             table_errors.append((fn, "%s; missing geotag" % filename_note))
             continue
 
         x, y = to_layer.transform(gps[1], gps[0])   # lon, lat
         pt = Point(x, y)
         overlaps = [(rec, fid, geom) for rec, fid, geom in polys if geom.distance(pt) == 0]
+        # mimo polygónov -> najbližší polygón s vyplneným RECORDID
+        nearest = None
+        if not overlaps and only_overlap:
+            nearest = min(
+                ((rec, geom) for rec, fid, geom in polys if rec is not None),
+                key=lambda t: t[1].distance(pt), default=None)
+        if nearest is not None:
+            near_rec, near_geom = nearest
+            note_by_file[fn] = ("%s; no overlap, nearest polygon (~%.0f m)"
+                                % (filename_note, near_geom.distance(pt)))
+            assigned.setdefault(near_rec, []).append(fn)
+            continue
         if not overlaps:
-            errors.append("%s: názov nezodpovedá [RECORDID] a GPS súradnice sa "
-                          "neprekrývajú so žiadnym polygónom." % fn)
+            errors.append("%s: %sGPS súradnice sa neprekrývajú so žiadnym "
+                          "polygónom." % (fn, why))
             table_errors.append((fn, "%s; geotag does not overlap any polygon" % filename_note))
             continue
         best_rec, best_fid, _ = min(overlaps, key=lambda t: t[2].area)
@@ -289,9 +317,25 @@ def main():
     with open(table_path, "w", encoding="utf-8", newline="") as f:
         f.write("\n".join(table_lines) + "\n")
 
+    # ---------- report s chybami ----------
+    report_lines = [
+        "Kontrola fotiek %s – %s" % (skuev, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "Priečinok: %s" % foto_dir,
+        "Určenie polygónu: %s" % ("len geotag (--only-overlap)" if only_overlap
+                                  else "názov súboru, potom geotag"),
+        "Obrázkov: %d, skonvertovaných na JPEG: %d" % (len(images), len(converted)),
+        "",
+        "=== CHYBY (%d) ===" % len(errors),
+    ]
+    report_lines.extend(errors if errors else ["(žiadne)"])
+    report_path = os.path.join(folder, "%s_FotoReport_%s.txt" % (skuev, stamp))
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines) + "\n")
+
     print("Kontrola fotiek %s – obrázkov: %d, skonvertovaných: %d, chýb: %d."
           % (skuev, len(images), len(converted), len(errors)))
     print("Tabuľka uložená do: %s" % table_path)
+    print("Report uložený do: %s" % report_path)
 
 
 if __name__ == "__main__":
