@@ -345,6 +345,7 @@ def main():
             druhy_kbx_by_rec.setdefault(str(r["fkRECORDID"]), set()).add(
                 r["kod_kbx"].strip().upper())
     aktivity_recs = {str(r["fkRECORDID"]) for r in aktivity if not is_empty(r["fkRECORDID"])}
+    druhy_recs = {str(r["fkRECORDID"]) for r in druhy if not is_empty(r["fkRECORDID"])}
     opatrenia_ids = {r["fkHabBiotopyID"] for r in opatrenia if r["fkHabBiotopyID"] is not None}
     # [RECORDID] je kľúč pre podriadené tabuľky – duplicity sa reportujú nižšie
     hlavna_by_recordid = {}
@@ -458,10 +459,11 @@ def main():
         if typ == "A" and all(evals[i] is None for i in range(4)):
             add_error("Typ 'A' bez vyplnenej etáže [e0]–[e3]", name)
 
-        # eN > 0 -> aspoň jeden druh s etaz='EN' (E0 sa nekontroluje)
+        # eN > 0 -> aspoň jeden druh s etaz='EN' (E0 sa nekontroluje,
+        # polygóny typu 'B' tiež nie)
         for i in range(1, 4):
             v = evals[i]
-            if v is None or num(v) <= 0:
+            if typ == "B" or v is None or num(v) <= 0:
                 continue
             etaz_kod = "E%d" % i
             have = etaze_by_rec.get(rec, set()) if rec else set()
@@ -469,7 +471,7 @@ def main():
                 warnings.append("%s: [e%d]=%s > 0, ale v tblHabDruhy nie je žiadny druh "
                                 "s [etaz]='%s'." % (name, i, v, etaz_kod))
 
-        # typ 'A' -> aspoň 1 záznam v biotopoch a aktivitách
+        # typ 'A' -> aspoň 1 záznam v biotopoch, aktivitách a druhoch
         if typ == "A":
             if rec is None:
                 add_error("Typ 'A' s prázdnym [RECORDID] – nedajú sa overiť "
@@ -479,6 +481,8 @@ def main():
                     add_error("Typ 'A' bez záznamu v tblHabBiotopy", name)
                 if rec not in aktivity_recs:
                     add_error("Typ 'A' bez záznamu v tblAktivity", name)
+                if rec not in druhy_recs:
+                    add_error("Typ 'A' bez záznamu v tblHabDruhy", name)
                 rec_biotopy = biotopy_by_rec.get(rec, [])
                 # KRO12/LES11/LES nemajú diagnostické druhy – v komplexe sa
                 # nepočítajú, takže 1 biotop + KRO12/LES11/LES nevyžaduje [kod_kbx]
