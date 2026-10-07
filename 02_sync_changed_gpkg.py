@@ -23,10 +23,15 @@ Credentials are loaded from .env in the same directory:
 Usage:
     1. Run 01_check_cloud_changes.py first to refresh the differ list.
     2. python 02_sync_changed_gpkg.py
+
+    Or sync one project directly:
+    python 02_sync_changed_gpkg.py SKUEV0250
 """
 
 import os
+import re
 import shutil
+import sys
 from pathlib import Path
 
 try:
@@ -155,12 +160,22 @@ def main() -> None:
     if not USERNAME or not PASSWORD:
         raise RuntimeError("QFIELDCLOUD_USERNAME / QFIELDCLOUD_PASSWORD not set in .env")
 
-    folders = read_differ_folders(DIFFER_FILE)
-    if not folders:
-        print(f"No folders listed in {DIFFER_FILE.name} — nothing to download.")
-        return
+    args = sys.argv[1:]
+    if len(args) > 1 or (args and not re.fullmatch(r"SKUEV\d{4}", args[0])):
+        print("Usage: python 02_sync_changed_gpkg.py [SKUEV????]")
+        sys.exit(2)
 
-    print(f"Folders to sync (from {DIFFER_FILE.name}):")
+    if args:
+        folders = [args[0]]
+        source = "command line parameter"
+    else:
+        folders = read_differ_folders(DIFFER_FILE)
+        source = DIFFER_FILE.name
+        if not folders:
+            print(f"No folders listed in {DIFFER_FILE.name} — nothing to download.")
+            return
+
+    print(f"Folders to sync (from {source}):")
     for name in folders:
         print(f"  - {name}")
     print(f"\nThis will DOWNLOAD '{TARGET_FILE}' from QFieldCloud and overwrite the "
