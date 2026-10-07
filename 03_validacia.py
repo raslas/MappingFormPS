@@ -506,58 +506,7 @@ def main():
                                       "vyplnený hodnotou z [biotop_cislo_new] (%s)."
                                       % (name, ", ".join(sorted(allowed_kbx))))
 
-    # ---------- 4. kontroly tblHabBiotopy ----------
-    # len biotopy s vyplneným číslom (nezačínajúcim na 'X' ani 'Ls')
-    # v polygónoch typu 'A'
-    hlavna_by_rec = {str(r["RECORDID"]): r for r in hlavna if not is_empty(r["RECORDID"])}
-    missing_by_poly = {}  # fid polygónu -> (polygón, [chýbajúce hodnoty po biotopoch])
-    for b in biotopy:
-        if is_empty(b["biotop_cislo"]):
-            continue
-        if b["biotop_cislo"].strip().upper().startswith(("X", "LS")):
-            continue
-        parent = hlavna_by_rec.get(str(b["fkRECORDID"]) if b["fkRECORDID"] is not None else "")
-        parent_typ = (None if parent is None or is_empty(parent["typ_polygon"])
-                      else parent["typ_polygon"].strip().upper())
-        if parent_typ != "A":
-            continue
-        # biotopy polygónu s vyplneným [polygon_id_form] sa nekontrolujú
-        if is_form_copy(parent):
-            continue
-        # v hláseniach sa uvádza nový kód (ak chýba, kód 2002)
-        kod_new = ("" if is_empty(b["biotop_cislo_new"])
-                   else b["biotop_cislo_new"].strip())
-        kod_show = kod_new or b["biotop_cislo"]
-        where = "tblHabBiotopy fid=%s, biotop='%s' (%s)" % (
-            b["fid"], kod_show, polyname(parent))
-
-        if is_empty(b["biotop_pokryv"]):
-            errors.append("%s: [biotop_pokryv] je prázdny." % where)
-        # kvalita/manažment/vyhliadky sa zbierajú a reportujú raz za polygón
-        missing = []
-        if not (num(b["kvalita_biotopu_good"]) > 0 or num(b["kvalita_biotopu_bad"]) > 0
-                or num(b["kvalita_biotopu_unsiut"]) > 0):
-            missing.append("kvalita")
-        if not (num(b["manazment_biotopu_vhod"]) > 0 or num(b["manazment_biotopu_nevhod"]) > 0):
-            missing.append("manazment")
-        if not (num(b["vyhliadky_biotopu_good"]) > 0 or num(b["vyhliadky_biotopu_bad"]) > 0
-                or num(b["vyhliadky_biotopu_unsiut"]) > 0):
-            missing.append("vyhliadky")
-        # kvalita/manažment/vyhliadky a opatrenia sa pri KRO12/LES11 nereportujú
-        if kod_new.upper() in KBX_EXEMPT_CODES:
-            continue
-        if missing:
-            missing_by_poly.setdefault(parent["fid"], (parent, []))[1].append(
-                "biotop '%s' (fid=%s): %s" % (kod_show, b["fid"], ", ".join(missing)))
-        if b["id"] is None or b["id"] not in opatrenia_ids:
-            warnings.append("%s: v tblHabBiotopyOpatrenia nie je žiadne opatrenie "
-                            "(fkHabBiotopyID=%s)." % (where, b["id"]))
-
-    # vypíšu sa v reporte ako samostatná sekcia
-    missing_values = ["%s: %s" % (polyname(parent), "; ".join(items))
-                      for parent, items in missing_by_poly.values()]
-
-    # ---------- 5. biotop_cislo_new – kontrola a doplnenie biotop_cislo ----------
+    # ---------- 4. biotop_cislo_new – kontrola a doplnenie biotop_cislo ----------
     biotopy_new_recs = {str(r["fkRECORDID"]) for r in biotopy
                         if not is_empty(r["fkRECORDID"])
                         and not is_empty(r["biotop_cislo_new"])}
@@ -613,6 +562,60 @@ def main():
             warnings.append("tblHabBiotopy: [biotop_cislo_new]='%s' sa v prevodníku "
                             "nenachádza – %d záznamov s prázdnym [biotop_cislo]."
                             % (kod, n))
+
+    # znovu načítať – kontroly nižšie majú vidieť doplnené [biotop_cislo]
+    biotopy = cur.execute("SELECT * FROM tblHabBiotopy").fetchall()
+
+    # ---------- 5. kontroly tblHabBiotopy ----------
+    # len biotopy s vyplneným číslom (nezačínajúcim na 'X' ani 'Ls')
+    # v polygónoch typu 'A'
+    hlavna_by_rec = {str(r["RECORDID"]): r for r in hlavna if not is_empty(r["RECORDID"])}
+    missing_by_poly = {}  # fid polygónu -> (polygón, [chýbajúce hodnoty po biotopoch])
+    for b in biotopy:
+        if is_empty(b["biotop_cislo"]):
+            continue
+        if b["biotop_cislo"].strip().upper().startswith(("X", "LS")):
+            continue
+        parent = hlavna_by_rec.get(str(b["fkRECORDID"]) if b["fkRECORDID"] is not None else "")
+        parent_typ = (None if parent is None or is_empty(parent["typ_polygon"])
+                      else parent["typ_polygon"].strip().upper())
+        if parent_typ != "A":
+            continue
+        # biotopy polygónu s vyplneným [polygon_id_form] sa nekontrolujú
+        if is_form_copy(parent):
+            continue
+        # v hláseniach sa uvádza nový kód (ak chýba, kód 2002)
+        kod_new = ("" if is_empty(b["biotop_cislo_new"])
+                   else b["biotop_cislo_new"].strip())
+        kod_show = kod_new or b["biotop_cislo"]
+        where = "tblHabBiotopy fid=%s, biotop='%s' (%s)" % (
+            b["fid"], kod_show, polyname(parent))
+
+        if is_empty(b["biotop_pokryv"]):
+            errors.append("%s: [biotop_pokryv] je prázdny." % where)
+        # kvalita/manažment/vyhliadky sa zbierajú a reportujú raz za polygón
+        missing = []
+        if not (num(b["kvalita_biotopu_good"]) > 0 or num(b["kvalita_biotopu_bad"]) > 0
+                or num(b["kvalita_biotopu_unsiut"]) > 0):
+            missing.append("kvalita")
+        if not (num(b["manazment_biotopu_vhod"]) > 0 or num(b["manazment_biotopu_nevhod"]) > 0):
+            missing.append("manazment")
+        if not (num(b["vyhliadky_biotopu_good"]) > 0 or num(b["vyhliadky_biotopu_bad"]) > 0
+                or num(b["vyhliadky_biotopu_unsiut"]) > 0):
+            missing.append("vyhliadky")
+        # kvalita/manažment/vyhliadky a opatrenia sa pri KRO12/LES11 nereportujú
+        if kod_new.upper() in KBX_EXEMPT_CODES:
+            continue
+        if missing:
+            missing_by_poly.setdefault(parent["fid"], (parent, []))[1].append(
+                "biotop '%s' (fid=%s): %s" % (kod_show, b["fid"], ", ".join(missing)))
+        if b["id"] is None or b["id"] not in opatrenia_ids:
+            warnings.append("%s: v tblHabBiotopyOpatrenia nie je žiadne opatrenie "
+                            "(fkHabBiotopyID=%s)." % (where, b["id"]))
+
+    # vypíšu sa v reporte ako samostatná sekcia
+    missing_values = ["%s: %s" % (polyname(parent), "; ".join(items))
+                      for parent, items in missing_by_poly.values()]
 
     con.commit()
     con.close()
