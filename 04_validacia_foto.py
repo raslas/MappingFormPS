@@ -145,7 +145,7 @@ def read_gps(path):
     return (lat_deg, lon_deg)
 
 
-def convert_to_jpeg(foto_dir, images, errors):
+def convert_to_jpeg(foto_dir, images, add_error):
     """Skonvertuje ne-JPEG obrázky na JPEG (s EXIF), originály zmaže.
 
     Vráti (nový zoznam súborov, zoznam hlásení o konverzii)."""
@@ -160,7 +160,8 @@ def convert_to_jpeg(foto_dir, images, errors):
         new_fn = base + ".jpg"
         dst = os.path.join(foto_dir, new_fn)
         if os.path.exists(dst):
-            errors.append("%s: nedá sa skonvertovať, %s už existuje." % (fn, new_fn))
+            add_error("Nedá sa skonvertovať na JPEG – cieľový súbor už existuje",
+                      "%s -> %s" % (fn, new_fn))
             result.append(fn)
             continue
         try:
@@ -170,7 +171,7 @@ def convert_to_jpeg(foto_dir, images, errors):
                     img = img.convert("RGB")
                 img.save(dst, "JPEG", quality=95, exif=exif)
         except Exception as e:
-            errors.append("%s: konverzia na JPEG zlyhala (%s)." % (fn, e))
+            add_error("Konverzia na JPEG zlyhala", "%s: %s" % (fn, e))
             if os.path.exists(dst):
                 os.remove(dst)
             result.append(fn)
@@ -213,24 +214,28 @@ def main():
         sys.exit("V tblHabHlavna nie sú žiadne polygóny s geometriou.")
     to_layer = Transformer.from_crs("EPSG:4326", "EPSG:%d" % srs, always_xy=True)
 
-    errors = []
+    errors = {}        # kategória -> [súbor / polygón a potrebný detail]
+
+    def add_error(category, item):
+        errors.setdefault(category, []).append(item)
+
     assigned = {}      # RECORDID -> [názvy súborov v poradí]
     note_by_file = {}  # názov súboru -> poznámka
     table_errors = []  # (original_name, note) pre nepriradené obrázky
     missing_photo_recs = []
 
     for fid in missing_required_rec_fids:
-        errors.append("tblHabHlavna fid=%s: [polygon_id_form] je prázdny, ale "
-                      "[RECORDID] nie je vyplnený – nedá sa overiť fotka." % fid)
+        add_error("Polygón s prázdnym [polygon_id_form] nemá vyplnený [RECORDID] – "
+                  "nedá sa overiť fotka", "fid=%s" % fid)
 
     images = sorted(
         f for f in os.listdir(foto_dir)
         if os.path.splitext(f)[1].lower() in IMAGE_EXTS)
     if not images:
-        errors.append("V priečinku %s nie sú žiadne obrázky." % foto_dir)
+        add_error("V priečinku nie sú žiadne obrázky", foto_dir)
         converted = []
     else:
-        images, converted = convert_to_jpeg(foto_dir, images, errors)
+        images, converted = convert_to_jpeg(foto_dir, images, add_error)
 
     for fn in images:
         if only_overlap:
@@ -248,18 +253,18 @@ def main():
                 filename_note = "filename RECORDID %d not in tblHabHlavna" % rec
             else:
                 filename_note = "no polygon number in filename"
-            why = "názov nezodpovedá [RECORDID] a "
+            why = " a názov nezodpovedá [RECORDID]"
 
         path = os.path.join(foto_dir, fn)
         try:
             gps = read_gps(path)
         except Exception as e:
-            errors.append("%s: %sobrázok sa nedá prečítať (%s)." % (fn, why, e))
+            add_error("Obrázok sa nedá prečítať%s" % why, "%s: %s" % (fn, e))
             table_errors.append((fn, "%s; cannot read image (%s)" % (filename_note, e)))
             continue
         if gps is None:
-            errors.append("%s: %sobrázok nemá GPS súradnice (geotag) – nedá sa "
-                          "určiť polygón." % (fn, why))
+            add_error("Obrázok nemá GPS súradnice (geotag)%s – nedá sa určiť "
+                      "polygón" % why, fn)
             table_errors.append((fn, "%s; missing geotag" % filename_note))
             continue
 
@@ -279,14 +284,14 @@ def main():
             assigned.setdefault(near_rec, []).append(fn)
             continue
         if not overlaps:
-            errors.append("%s: %sGPS súradnice sa neprekrývajú so žiadnym "
-                          "polygónom." % (fn, why))
+            add_error("GPS súradnice sa neprekrývajú so žiadnym polygónom%s" % why,
+                      fn)
             table_errors.append((fn, "%s; geotag does not overlap any polygon" % filename_note))
             continue
         best_rec, best_fid, _ = min(overlaps, key=lambda t: t[2].area)
         if best_rec is None:
-            errors.append("%s: prekrytý polygón (fid=%s) nemá vyplnený [RECORDID] – "
-                          "nedá sa zaradiť do tabuľky." % (fn, best_fid))
+            add_error("Prekrytý polygón nemá vyplnený [RECORDID] – nedá sa zaradiť "
+                      "do tabuľky", "%s (fid=%s)" % (fn, best_fid))
             table_errors.append((fn, "overlapped polygon (fid=%s) has no RECORDID" % best_fid))
             continue
         note_by_file[fn] = "%s; polygon from geotag overlap" % filename_note
@@ -294,8 +299,8 @@ def main():
 
     for rec in sorted(required_recs):
         if rec not in assigned:
-            errors.append("RECORDID=%s: polygón má prázdny [polygon_id_form], ale "
-                          "v priečinku f nemá žiadnu fotku." % rec)
+            add_error("Polygón s prázdnym [polygon_id_form] nemá v priečinku f "
+                      "žiadnu fotku", "RECORDID=%s" % rec)
             missing_photo_recs.append(rec)
 
     # ---------- tabuľka (TSV) ----------
@@ -318,6 +323,7 @@ def main():
         f.write("\n".join(table_lines) + "\n")
 
     # ---------- report s chybami ----------
+    n_errors = sum(len(v) for v in errors.values())
     report_lines = [
         "Kontrola fotiek %s – %s" % (skuev, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         "Priečinok: %s" % foto_dir,
@@ -325,15 +331,21 @@ def main():
                                   else "názov súboru, potom geotag"),
         "Obrázkov: %d, skonvertovaných na JPEG: %d" % (len(images), len(converted)),
         "",
-        "=== CHYBY (%d) ===" % len(errors),
+        "=== CHYBY (%d) ===" % n_errors,
     ]
-    report_lines.extend(errors if errors else ["(žiadne)"])
+    # chyby zoskupené podľa kategórie, v kategórii len súbor/polygón a detail
+    if not errors:
+        report_lines.append("(žiadne)")
+    for category, items in errors.items():
+        report_lines.append("")
+        report_lines.append("--- %s (%d) ---" % (category, len(items)))
+        report_lines.extend("  " + item for item in items)
     report_path = os.path.join(folder, "%s_FotoReport_%s.txt" % (skuev, stamp))
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(report_lines) + "\n")
 
     print("Kontrola fotiek %s – obrázkov: %d, skonvertovaných: %d, chýb: %d."
-          % (skuev, len(images), len(converted), len(errors)))
+          % (skuev, len(images), len(converted), n_errors))
     print("Tabuľka uložená do: %s" % table_path)
     print("Report uložený do: %s" % report_path)
 
