@@ -279,9 +279,12 @@ def main():
     mapovatelia = load_mapovatelia(MAPOVATEL_FILE)
     mapovatel = mapovatelia.get(skuev)
 
-    errors = []    # chybové hlásenia
+    errors = {}    # chybové hlásenia: kategória -> [polygón / detail]
     warnings = []  # varovania
     fixes = []     # vykonané opravy
+
+    def add_error(category, item):
+        errors.setdefault(category, []).append(item)
 
     # záloha pred zápisom
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -313,15 +316,11 @@ def main():
         cur.execute(
             "DELETE FROM tblHabDruhy WHERE fid NOT IN "
             "(SELECT MIN(fid) FROM tblHabDruhy GROUP BY %s)" % group_by)
-        poly_by_rec = {str(r["RECORDID"]): r["polygon_id"] for r in hlavna
-                       if not is_empty(r["RECORDID"])}
         for g in dup_groups:
-            poly = poly_by_rec.get(
-                "" if g["fkRECORDID"] is None else str(g["fkRECORDID"]), "?")
-            fixes.append("tblHabDruhy: polygon_id=%s (fkRECORDID=%s), druh '%s' "
+            fixes.append("tblHabDruhy: RECORDID=%s, druh '%s' "
                          "[etaz]='%s': zmazaných %d duplicitných záznamov "
                          "(1 ponechaný)."
-                         % (poly, g["fkRECORDID"], g["NAZOV_LAT"], g["etaz"],
+                         % (g["fkRECORDID"], g["NAZOV_LAT"], g["etaz"],
                             g["extra"]))
 
     druhy = cur.execute("SELECT fid, fkRECORDID, etaz, kod_kbx FROM tblHabDruhy").fetchall()
@@ -359,7 +358,7 @@ def main():
                 hlavna_by_recordid[key] = r
 
     def polyname(row):
-        return "polygon_id=%s (fid=%s)" % (row["polygon_id"], row["fid"])
+        return "RECORDID=%s (fid=%s)" % (row["RECORDID"], row["fid"])
 
     # Polygón s vyplneným [polygon_id_form] má údaje vedené na polygóne,
     # ktorého [RECORDID] je v tomto poli – kontroly aj opravy prebehnú tam,
@@ -382,12 +381,12 @@ def main():
             continue
         c = centers[row["fid"]]
         if c is None:
-            errors.append("%s: prázdny [datum] a polygón nemá geometriu – nedá sa doplniť."
-                          % polyname(row))
+            add_error("Prázdny [datum], polygón nemá geometriu – nedá sa doplniť",
+                      polyname(row))
             continue
         if not dated:
-            errors.append("%s: prázdny [datum] a žiadny polygón v vrstve nemá vyplnený "
-                          "dátum – nedá sa doplniť." % polyname(row))
+            add_error("Prázdny [datum], žiadny polygón vo vrstve nemá dátum – "
+                      "nedá sa doplniť", polyname(row))
             continue
         best, best_d = None, None
         for other in dated:
@@ -398,13 +397,14 @@ def main():
         cur.execute("UPDATE tblHabHlavna SET datum = ? WHERE fid = ?",
                     (best["datum"], row["fid"]))
         fixes.append("%s: [datum] doplnený na '%s' podľa najbližšieho polygónu "
-                     "polygon_id=%s (vzdialenosť ~%.0f m)."
-                     % (polyname(row), best["datum"], best["polygon_id"], best_d))
+                     "RECORDID=%s (vzdialenosť ~%.0f m)."
+                     % (polyname(row), best["datum"], best["RECORDID"], best_d))
 
     # ---------- 2. hlavny_mapovatel ----------
     if mapovatel is None:
-        errors.append("SKUEV %s sa nenachádza v %s – [hlavny_mapovatel] nebol vyplnený."
-                      % (skuev, os.path.basename(MAPOVATEL_FILE)))
+        add_error("[hlavny_mapovatel] nebol vyplnený",
+                  "%s sa nenachádza v %s"
+                  % (skuev, os.path.basename(MAPOVATEL_FILE)))
     else:
         cur.execute(
             "UPDATE tblHabHlavna SET hlavny_mapovatel = ? "
@@ -420,11 +420,10 @@ def main():
     # Nová hodnota vzniká ako max+1, čo pri paralelnom offline mapovaní dvoma
     # zariadeniami môže dať rovnaké číslo.
     for key, rows in sorted(recordid_dupes.items()):
-        errors.append(
-            "[RECORDID]=%s je duplicitné – %s. Podriadené záznamy sa priradia "
-            "nesprávne a do Access DB sa vloží len jeden polygón; treba "
-            "prečíslovať a upraviť aj [fkRECORDID] detí."
-            % (key, ", ".join(polyname(r) for r in rows)))
+        add_error("Duplicitné [RECORDID] – podriadené záznamy sa priradia "
+                  "nesprávne a do Access DB sa vloží len jeden polygón; "
+                  "prečíslovať a upraviť aj [fkRECORDID] detí",
+                  "RECORDID=%s: fid %s" % (key, ", ".join(str(r["fid"]) for r in rows)))
 
     for row in hlavna:
         if is_form_copy(row):
@@ -434,10 +433,10 @@ def main():
 
         typ = None if is_empty(row["typ_polygon"]) else row["typ_polygon"].strip().upper()
         if typ is None:
-            errors.append("%s: [typ_polygon] je prázdny (povolené hodnoty 'A'/'B')." % name)
+            add_error("Prázdny [typ_polygon] (povolené 'A'/'B')", name)
         elif typ not in ("A", "B"):
-            errors.append("%s: [typ_polygon]='%s' – povolené sú len 'A' alebo 'B'."
-                          % (name, row["typ_polygon"]))
+            add_error("Neplatný [typ_polygon] (povolené 'A'/'B')",
+                      "%s: '%s'" % (name, row["typ_polygon"]))
 
         # e0–e3: rozsah 0–100
         evals = {}
@@ -457,8 +456,7 @@ def main():
                 warnings.append("%s: [%s]=%s je mimo rozsahu 0–100." % (name, col, v))
 
         if typ == "A" and all(evals[i] is None for i in range(4)):
-            errors.append("%s: typ 'A', ale žiadna z etáží [e0]–[e3] nie je vyplnená."
-                            % name)
+            add_error("Typ 'A' bez vyplnenej etáže [e0]–[e3]", name)
 
         # eN > 0 -> aspoň jeden druh s etaz='EN' (E0 sa nekontroluje)
         for i in range(1, 4):
@@ -474,15 +472,13 @@ def main():
         # typ 'A' -> aspoň 1 záznam v biotopoch a aktivitách
         if typ == "A":
             if rec is None:
-                errors.append("%s: typ 'A', ale [RECORDID] je prázdny – nedajú sa overiť "
-                              "súvisiace tabuľky." % name)
+                add_error("Typ 'A' s prázdnym [RECORDID] – nedajú sa overiť "
+                          "súvisiace tabuľky", name)
             else:
                 if rec not in biotopy_recs:
-                    errors.append("%s: typ 'A', ale v tblHabBiotopy nie je žiadny záznam."
-                                  % name)
+                    add_error("Typ 'A' bez záznamu v tblHabBiotopy", name)
                 if rec not in aktivity_recs:
-                    errors.append("%s: typ 'A', ale v tblAktivity nie je žiadny záznam."
-                                  % name)
+                    add_error("Typ 'A' bez záznamu v tblAktivity", name)
                 rec_biotopy = biotopy_by_rec.get(rec, [])
                 # KRO12/LES11/LES nemajú diagnostické druhy – v komplexe sa
                 # nepočítajú, takže 1 biotop + KRO12/LES11/LES nevyžaduje [kod_kbx]
@@ -496,15 +492,13 @@ def main():
                                    if not is_empty(b["biotop_cislo_new"])}
                     have_kbx = druhy_kbx_by_rec.get(rec, set())
                     if not allowed_kbx:
-                        errors.append("%s: typ 'A' a má viac biotopov, ale žiadny "
-                                      "záznam v tblHabBiotopy nemá vyplnený "
-                                      "[biotop_cislo_new] pre kontrolu [kod_kbx]."
-                                      % name)
+                        add_error("Typ 'A' s viacerými biotopmi, žiadny nemá "
+                                  "[biotop_cislo_new] pre kontrolu [kod_kbx]", name)
                     elif not (have_kbx & allowed_kbx):
-                        errors.append("%s: typ 'A' a má viac biotopov v tblHabBiotopy, "
-                                      "ale žiadny druh v tblHabDruhy nemá [kod_kbx] "
-                                      "vyplnený hodnotou z [biotop_cislo_new] (%s)."
-                                      % (name, ", ".join(sorted(allowed_kbx))))
+                        add_error("Typ 'A' s viacerými biotopmi, žiadny druh "
+                                  "v tblHabDruhy nemá [kod_kbx] z [biotop_cislo_new] "
+                                  "(uvedené povolené kódy)",
+                                  "%s: %s" % (name, ", ".join(sorted(allowed_kbx))))
 
     # ---------- 4. biotop_cislo_new – kontrola a doplnenie biotop_cislo ----------
     biotopy_new_recs = {str(r["fkRECORDID"]) for r in biotopy
@@ -516,19 +510,18 @@ def main():
         name = polyname(row)
         rec = recordid_of(row)
         if rec is None:
-            errors.append("%s: [RECORDID] je prázdny – nedá sa overiť, či má "
-                          "záznam v tblHabBiotopy s vyplneným [biotop_cislo_new]."
-                          % name)
+            add_error("Prázdny [RECORDID] – nedá sa overiť [biotop_cislo_new] "
+                      "v tblHabBiotopy", name)
         elif rec not in biotopy_new_recs:
-            errors.append("%s: v tblHabBiotopy nie je žiadny záznam s vyplneným "
-                          "[biotop_cislo_new]." % name)
+            add_error("Žiadny záznam v tblHabBiotopy s vyplneným "
+                      "[biotop_cislo_new]", name)
 
     try:
         kod_mapping = load_kod_mapping(MAPPING_FILE)
     except OSError as e:
         kod_mapping = None
-        errors.append("Prevodník %s sa nedá čítať (%s) – [biotop_cislo] "
-                      "nebol doplnený." % (os.path.basename(MAPPING_FILE), e))
+        add_error("Prevodník sa nedá čítať – [biotop_cislo] nebol doplnený",
+                  "%s: %s" % (os.path.basename(MAPPING_FILE), e))
     if kod_mapping:
         filled = {}     # kod_2023 -> [kod_2002, počet]
         ambiguous = {}  # kod_2023 -> [kandidáti, počet]
@@ -592,7 +585,9 @@ def main():
             b["fid"], kod_show, polyname(parent))
 
         if is_empty(b["biotop_pokryv"]):
-            errors.append("%s: [biotop_pokryv] je prázdny." % where)
+            add_error("Prázdny [biotop_pokryv] v tblHabBiotopy",
+                      "%s: biotop '%s' (fid=%s)"
+                      % (polyname(parent), kod_show, b["fid"]))
         # kvalita/manažment/vyhliadky sa zbierajú a reportujú raz za polygón
         missing = []
         if not (num(b["kvalita_biotopu_good"]) > 0 or num(b["kvalita_biotopu_bad"]) > 0
@@ -631,8 +626,14 @@ def main():
     lines.append("=== OPRAVY (%d) ===" % len(fixes))
     lines.extend(fixes if fixes else ["(žiadne)"])
     lines.append("")
-    lines.append("=== CHYBY (%d) ===" % len(errors))
-    lines.extend(errors if errors else ["(žiadne)"])
+    # chyby zoskupené podľa kategórie, v kategórii len polygón a potrebný detail
+    lines.append("=== CHYBY (%d) ===" % sum(len(v) for v in errors.values()))
+    if not errors:
+        lines.append("(žiadne)")
+    for category, items in errors.items():
+        lines.append("")
+        lines.append("--- %s (%d) ---" % (category, len(items)))
+        lines.extend("  " + item for item in items)
     lines.append("")
     lines.append("=== CHÝBAJÚ HODNOTY BIOTOPU (žiadna nie je nad nulou) (%d) ==="
                  % len(missing_values))
