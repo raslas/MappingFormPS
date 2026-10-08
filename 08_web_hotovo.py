@@ -30,6 +30,7 @@ foto\\SKUEV####.
 Dátumy odovzdania (stĺpce mapovatelOK, daphneOK, sopOK zo skuev_mapovatel.txt)
 sa pri každom spustení (aj --list) zapíšu do data\\datumy.json, z ktorého ich
 číta zoznam území. Po zmene dátumov stačí spustiť --list a nahrať tento súbor.
+Územie bez dátumu mapovatelOK sa v zozname území (index.php) nezobrazí.
 
 Čo sa ukladá (každá databáza územia má tieto tabuľky):
   skuev      – jeden riadok o území (názov z N2000, počet polygónov, plocha,
@@ -97,6 +98,7 @@ MAPOVATEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "skuev_mapovatel.txt")
 DATUMY_COLUMNS = ("mapovatelOK", "daphneOK", "sopOK")
 DATUMY_JSON = "datumy.json"      # dátumy odovzdania pre index.php
+SHOW_COLUMN = "mapovatelOK"      # bez tohto dátumu index.php územie nezobrazí
 
 # fotky: <cloud>\SKUEV####\f  ->  <priečinok data>\foto\SKUEV####
 FOTO_SUBDIR = "f"                # priečinok s fotkami v cloude (ako v 07)
@@ -990,11 +992,23 @@ def list_sites(data_dir):
     if not rows:
         print("Na webe nie je zatiaľ žiadne územie.")
         return
+    zobrazene = shown_sites(data_dir)
     print("Územia na webe (%d):" % len(rows))
     for kod, nazov, pocet, plocha, fotiek, akt in rows:
-        print("   %s  %-32s %4d polygónov  %10.2f ha  %4d fotiek   %s"
+        print("   %s  %-32s %4d polygónov  %10.2f ha  %4d fotiek   %s%s"
               % (kod, nazov or "", pocet or 0, plocha or 0, fotiek or 0,
-                 akt or ""))
+                 akt or "",
+                 "" if kod in zobrazene else "   SKRYTÉ (chýba mapovatelOK)"))
+
+
+def shown_sites(data_dir):
+    """Územia, ktoré index.php zobrazí – majú v datumy.json [mapovatelOK]."""
+    try:
+        with open(os.path.join(data_dir, DATUMY_JSON), encoding="utf-8") as f:
+            datumy = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    return {kod for kod, d in datumy.items() if d.get(SHOW_COLUMN)}
 
 
 def write_datumy(data_dir):
@@ -1116,6 +1130,9 @@ def main():
         _, bajtov = export_fotky(site, polygons, foto_root, warnings)
         counts = build_site_db(data_dir, site, polygons)
         print("   databáza:   %s" % site_db_path(data_dir, code))
+        if code not in shown_sites(data_dir):
+            warnings.append("V skuev_mapovatel.txt chýba dátum [%s] – územie "
+                            "sa v zozname na webe nezobrazí." % SHOW_COLUMN)
         print("   zdroj:      %s" % site["zdroj"])
         print("   názov:      %s" % (site["nazov"] or "(nenájdený v N2000)"))
         print("   polygóny:   %d (%.2f ha)"
