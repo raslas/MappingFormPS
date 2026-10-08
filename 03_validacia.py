@@ -192,7 +192,12 @@ def load_mapovatelia(path):
             line = line.strip()
             if not line:
                 continue
-            parts = re.split(r"\t+|\s{2,}| ", line, maxsplit=1)
+            if "\t" in line:
+                # skuev, mapovatel, [mapovatelOK, daphneOK, sopOK] – meno je
+                # len druhý stĺpec, dátumy za ním doň nepatria
+                parts = line.split("\t")[:2]
+            else:
+                parts = re.split(r"\s{2,}| ", line, maxsplit=1)
             if len(parts) != 2:
                 continue
             key, name = parts[0].strip().upper(), parts[1].strip()
