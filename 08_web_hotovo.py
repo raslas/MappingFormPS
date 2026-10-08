@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Naplní webovú SQLite databázu pre prezeračku hotových území
+Naplní webové SQLite databázy pre prezeračku hotových území
 (C:\\wamp64\\www\\MapovaniePrePSHotovo).
 
 Zdroj údajov:  <cloud>\\SKUEV####\\MapovaniePrePS.gpkg (+ AktivityLookup.gpkg
                v tom istom priečinku) – teda tie isté súbory, z ktorých
                exportujú 05_export_shapefile.py a 06_naplnenie_access.py,
                a fotky z <cloud>\\SKUEV####\\f (+ SKUEV####_FotoTable_*.txt).
-Výstup:        C:\\wamp64\\www\\MapovaniePrePSHotovo\\data\\hotovo.sqlite
+Výstup:        C:\\wamp64\\www\\MapovaniePrePSHotovo\\data\\SKUEV####.sqlite
+                   (jedna databáza na územie – na server sa nahrá len
+                   zmenené územie)
                C:\\wamp64\\www\\MapovaniePrePSHotovo\\data\\foto\\SKUEV####\\
                    zmenšené fotky (+ podpriečinok "n" s náhľadmi)
 
-Do databázy sa dostane len to, čo sem pošleš argumentom – "hotové" územie je
+Na web sa dostane len to, čo sem pošleš argumentom – "hotové" územie je
 to, ktoré si sem pridal:
 
     python 08_web_hotovo.py SKUEV0870
@@ -20,12 +22,14 @@ to, ktoré si sem pridal:
     python 08_web_hotovo.py --list                  # čo je práve na webe
     python 08_web_hotovo.py SKUEV0870 --bez-fotiek  # rýchly refresh bez fotiek
 
-Opakované spustenie pre to isté územie jeho údaje prepíše (najprv zmaže staré
-riadky), takže sa dá po každej zmene v cloude spustiť znova.
+Opakované spustenie pre to isté územie jeho databázu vytvorí nanovo (zostaví sa
+pod dočasným názvom a až potom nahradí starú), takže sa dá po každej zmene
+v cloude spustiť znova. Na server stačí nahrať SKUEV####.sqlite a priečinok
+foto\\SKUEV####.
 
-Čo sa ukladá:
-  skuev      – jedno územie (názov z N2000, počet polygónov, plocha, rozsah
-               mapy, dátumy, mapovatelia)
+Čo sa ukladá (každá databáza územia má tieto tabuľky):
+  skuev      – jeden riadok o území (názov z N2000, počet polygónov, plocha,
+               rozsah mapy, dátumy, mapovatelia)
   polygon    – riadky tblHabHlavna s geometriou prepočítanou z EPSG:5514 do
                WGS84 (JSON zoznam prstencov, priamo použiteľný pre Google Maps)
   biotop     – tblHabBiotopy s rozpísanými kódmi (2002 aj 2023) a kvalitou
@@ -80,13 +84,14 @@ CLOUD_DIR = r"C:\Users\RASLAS\QField\cloud"
 GPKG_NAME = "MapovaniePrePS.gpkg"
 AKTIVITY_GPKG = "AktivityLookup.gpkg"
 WEB_DIR = r"C:\wamp64\www\MapovaniePrePSHotovo"
-WEB_DB = os.path.join(WEB_DIR, "data", "hotovo.sqlite")
+WEB_DATA_DIR = os.path.join(WEB_DIR, "data")
+OLD_WEB_DB = "hotovo.sqlite"     # pôvodná spoločná databáza – už sa nepoužíva
 N2000_GPKG = r"C:\_projects\MapovaniePrePS\N2000_2024.gpkg"
 N2000_TABLE = "natura2000_end2024_mapovaniePrePS"
 
-# fotky: <cloud>\SKUEV####\f  ->  <priečinok databázy>\foto\SKUEV####
+# fotky: <cloud>\SKUEV####\f  ->  <priečinok data>\foto\SKUEV####
 FOTO_SUBDIR = "f"                # priečinok s fotkami v cloude (ako v 07)
-WEB_FOTO_DIR = "foto"            # priečinok vedľa hotovo.sqlite
+WEB_FOTO_DIR = "foto"            # priečinok vedľa databáz území
 NAHLAD_SUBDIR = "n"              # náhľady v priečinku územia
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"}
 FOTO_MAX_PX = 1600               # dlhšia strana veľkej fotky na webe
@@ -831,37 +836,38 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
 # Zápis do webovej databázy
 # ----------------------------------------------------------------------
 
+def site_db_path(data_dir, skuev):
+    """Databáza jedného územia: <data>\\SKUEV####.sqlite."""
+    return os.path.join(data_dir, skuev + ".sqlite")
+
+
 def open_web_db(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
-    # staršie databázy (bez fotiek) doplní o nový stĺpec
-    stlpce = [r[1] for r in con.execute("PRAGMA table_info(skuev)")]
-    if "pocet_fotiek" not in stlpce:
-        con.execute("ALTER TABLE skuev ADD COLUMN pocet_fotiek INTEGER")
     return con
 
 
-def remove_site(con, skuev, foto_root=None):
-    """Zmaže územie aj so všetkými deťmi (a fotkami, ak je zadaný `foto_root`).
+def remove_site(data_dir, skuev, foto_root=None):
+    """Zmaže databázu územia (a fotky, ak je zadaný `foto_root`).
 
-    Vráti (počet polygónov, počet fotiek)."""
-    fotiek = con.execute("SELECT COUNT(*) FROM foto WHERE skuev = ?",
-                         (skuev,)).fetchone()[0]
-    con.execute("DELETE FROM foto WHERE skuev = ?", (skuev,))
+    Vráti (počet polygónov, počet fotiek), alebo None, ak územie na webe nie je."""
+    path = site_db_path(data_dir, skuev)
     if foto_root:
         remove_foto_dir(foto_root, skuev)
-    ids = [r[0] for r in con.execute("SELECT id FROM polygon WHERE skuev = ?",
-                                     (skuev,))]
-    if ids:
-        marks = ",".join("?" * len(ids))
-        con.execute("DELETE FROM opatrenie WHERE biotop_fk IN "
-                    "(SELECT id FROM biotop WHERE polygon_fk IN (%s))" % marks, ids)
-        for table in ("biotop", "druh", "aktivita"):
-            con.execute("DELETE FROM %s WHERE polygon_fk IN (%s)" % (table, marks), ids)
-        con.execute("DELETE FROM polygon WHERE skuev = ?", (skuev,))
-    con.execute("DELETE FROM skuev WHERE kod = ?", (skuev,))
-    return len(ids), fotiek
+    if not os.path.isfile(path):
+        return None
+    try:
+        con = sqlite3.connect(path)
+        counts = (con.execute("SELECT COUNT(*) FROM polygon").fetchone()[0],
+                  con.execute("SELECT COUNT(*) FROM foto").fetchone()[0])
+        con.close()
+    except sqlite3.Error:
+        counts = (0, 0)
+    try:
+        os.remove(path)
+    except OSError as e:
+        sys.exit("%s sa nedá zmazať (%s)." % (path, e))
+    return counts
 
 
 def insert_fotky(con, skuev, polygon_fk, fotky):
@@ -880,7 +886,6 @@ def insert_fotky(con, skuev, polygon_fk, fotky):
 
 
 def write_site(con, site, polygons):
-    remove_site(con, site["kod"])
     pocet_fotiek = len([f for p in polygons for f in p["fotky"] if f.get("subor")]
                        + [f for f in site["fotky_nepriradene"] if f.get("subor")])
     con.execute(
@@ -959,10 +964,20 @@ def write_site(con, site, polygons):
     return counts
 
 
-def list_sites(con):
-    rows = con.execute("SELECT kod, nazov, pocet_polygonov, plocha_ha, "
-                       "pocet_fotiek, aktualizovane FROM skuev "
-                       "ORDER BY kod").fetchall()
+def list_sites(data_dir):
+    rows = []
+    for path in sorted(glob.glob(os.path.join(
+            data_dir, "SKUEV[0-9][0-9][0-9][0-9].sqlite"))):
+        try:
+            con = sqlite3.connect(path)
+            row = con.execute("SELECT kod, nazov, pocet_polygonov, plocha_ha, "
+                              "pocet_fotiek, aktualizovane FROM skuev").fetchone()
+            con.close()
+        except sqlite3.Error as e:
+            print("   UPOZORNENIE: %s sa nedá prečítať (%s)." % (path, e))
+            continue
+        if row:
+            rows.append(row)
     if not rows:
         print("Na webe nie je zatiaľ žiadne územie.")
         return
@@ -973,15 +988,37 @@ def list_sites(con):
                  akt or ""))
 
 
+def build_site_db(data_dir, site, polygons):
+    """Zostaví databázu územia pod dočasným názvom a potom ňou nahradí starú,
+    aby web nikdy nečítal napoly zapísaný súbor. Vráti počty riadkov."""
+    path = site_db_path(data_dir, site["kod"])
+    tmp = path + ".tmp"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    con = open_web_db(tmp)
+    try:
+        counts = write_site(con, site, polygons)
+        con.commit()
+    finally:
+        con.close()
+    try:
+        os.replace(tmp, path)
+    except OSError as e:
+        sys.exit("%s sa nedá prepísať (%s) – nie je otvorená inde? Nová "
+                 "databáza ostala v %s." % (path, e, tmp))
+    return counts
+
+
 # ----------------------------------------------------------------------
 # Hlavná logika
 # ----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Naplní webovú SQLite databázu hotových území.")
+        description="Naplní webové SQLite databázy hotových území.")
     parser.add_argument("skuev", nargs="*", help="kódy území, napr. SKUEV0870 0862")
-    parser.add_argument("--db", default=WEB_DB, help="cesta k webovej databáze")
+    parser.add_argument("--data", default=WEB_DATA_DIR,
+                        help="priečinok s databázami území (a fotkami)")
     parser.add_argument("--remove", action="store_true",
                         help="územia zadané v argumentoch z webu odstráni")
     parser.add_argument("--list", action="store_true",
@@ -990,14 +1027,17 @@ def main():
                         help="fotky sa nekopírujú (rýchly refresh údajov)")
     args = parser.parse_args()
 
-    con = open_web_db(args.db)
-    # fotky idú vedľa databázy: <priečinok hotovo.sqlite>\foto\SKUEV####
-    foto_root = os.path.join(os.path.dirname(os.path.abspath(args.db)),
-                             WEB_FOTO_DIR)
+    data_dir = os.path.abspath(args.data)
+    os.makedirs(data_dir, exist_ok=True)
+    # fotky idú vedľa databáz: <data>\foto\SKUEV####
+    foto_root = os.path.join(data_dir, WEB_FOTO_DIR)
+    if os.path.isfile(os.path.join(data_dir, OLD_WEB_DB)):
+        print("POZNÁMKA: %s je pôvodná spoločná databáza, web ju už nečíta – "
+              "územia z nej pridaj znova a súbor zmaž."
+              % os.path.join(data_dir, OLD_WEB_DB))
 
     if args.list and not args.skuev:
-        list_sites(con)
-        con.close()
+        list_sites(data_dir)
         return
 
     codes = []
@@ -1011,17 +1051,18 @@ def main():
     if not codes:
         sys.exit("Zadaj aspoň jedno územie, napr.: python 08_web_hotovo.py SKUEV0870")
 
-    print("Databáza: %s" % args.db)
+    print("Databázy: %s" % data_dir)
     print("Fotky:    %s" % foto_root)
 
     if args.remove:
         for code in codes:
-            n, fotiek = remove_site(con, code, foto_root)
-            con.commit()
-            print("%s odstránené z webu (%d polygónov, %d fotiek)."
-                  % (code, n, fotiek))
-        list_sites(con)
-        con.close()
+            removed = remove_site(data_dir, code, foto_root)
+            if removed is None:
+                print("%s na webe nie je." % code)
+            else:
+                print("%s odstránené z webu (%d polygónov, %d fotiek)."
+                      % ((code,) + removed))
+        list_sites(data_dir)
         return
 
     for code in codes:
@@ -1030,8 +1071,8 @@ def main():
         folder = find_folder(code)
         site, polygons = read_site(code, folder, warnings, not args.bez_fotiek)
         _, bajtov = export_fotky(site, polygons, foto_root, warnings)
-        counts = write_site(con, site, polygons)
-        con.commit()
+        counts = build_site_db(data_dir, site, polygons)
+        print("   databáza:   %s" % site_db_path(data_dir, code))
         print("   zdroj:      %s" % site["zdroj"])
         print("   názov:      %s" % (site["nazov"] or "(nenájdený v N2000)"))
         print("   polygóny:   %d (%.2f ha)"
@@ -1058,10 +1099,8 @@ def main():
             if len(warnings) > 20:
                 print("      ... a ďalších %d" % (len(warnings) - 20))
 
-    con.execute("VACUUM")
     print()
-    list_sites(con)
-    con.close()
+    list_sites(data_dir)
 
 
 if __name__ == "__main__":
