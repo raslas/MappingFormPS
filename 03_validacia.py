@@ -47,7 +47,11 @@ MAPOVATEL_FILE = os.path.join(SCRIPT_DIR, "skuev_mapovatel.txt")
 MAPPING_FILE = os.path.join(SCRIPT_DIR, "tblHabMapping_kod2002_kod2023.txt")
 GPKG_NAME = "MapovaniePrePS.gpkg"
 # biotopy bez diagnostických druhov – nepočítajú sa do komplexu pri kontrole [kod_kbx]
-KBX_EXEMPT_CODES = {"KRO12", "LES11", "LES"}
+# (porovnáva sa s kódom prevedeným na veľké písmená, preto .upper())
+KBX_EXEMPT_CODES = {c.upper() for c in (
+    "BRP01", "KRO11", "KRO12", "RAS04", "SKA08", "SKA09",
+    "LES11", "XX06", "VOD15a", "VOD15b", "LES",
+)}
 
 
 # ----------------------------------------------------------------------
@@ -489,8 +493,8 @@ def main():
                 if rec not in druhy_recs:
                     add_error("Typ 'A' bez záznamu v tblHabDruhy", name)
                 rec_biotopy = biotopy_by_rec.get(rec, [])
-                # KRO12/LES11/LES nemajú diagnostické druhy – v komplexe sa
-                # nepočítajú, takže 1 biotop + KRO12/LES11/LES nevyžaduje [kod_kbx]
+                # biotopy z KBX_EXEMPT_CODES nemajú diagnostické druhy – v komplexe
+                # sa nepočítajú, takže 1 biotop + výnimka nevyžaduje [kod_kbx]
                 normal_biotopy = [b for b in rec_biotopy
                                   if is_empty(b["biotop_cislo_new"])
                                   or b["biotop_cislo_new"].strip().upper()
@@ -607,7 +611,7 @@ def main():
         if not (num(b["vyhliadky_biotopu_good"]) > 0 or num(b["vyhliadky_biotopu_bad"]) > 0
                 or num(b["vyhliadky_biotopu_unsiut"]) > 0):
             missing.append("vyhliadky")
-        # kvalita/manažment/vyhliadky a opatrenia sa pri KRO12/LES11/LES nereportujú
+        # kvalita/manažment/vyhliadky a opatrenia sa pri KBX_EXEMPT_CODES nereportujú
         if kod_new.upper() in KBX_EXEMPT_CODES:
             continue
         if missing:
