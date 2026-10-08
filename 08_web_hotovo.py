@@ -27,6 +27,10 @@ pod dočasným názvom a až potom nahradí starú), takže sa dá po každej zm
 v cloude spustiť znova. Na server stačí nahrať SKUEV####.sqlite a priečinok
 foto\\SKUEV####.
 
+Dátumy odovzdania (stĺpce mapovatelOK, daphneOK, sopOK zo skuev_mapovatel.txt)
+sa pri každom spustení (aj --list) zapíšu do data\\datumy.json, z ktorého ich
+číta zoznam území. Po zmene dátumov stačí spustiť --list a nahrať tento súbor.
+
 Čo sa ukladá (každá databáza územia má tieto tabuľky):
   skuev      – jeden riadok o území (názov z N2000, počet polygónov, plocha,
                rozsah mapy, dátumy, mapovatelia)
@@ -56,6 +60,7 @@ kopírujú v pôvodnej veľkosti a bez náhľadov.
 """
 
 import argparse
+import csv
 import glob
 import json
 import os
@@ -88,6 +93,10 @@ WEB_DATA_DIR = os.path.join(WEB_DIR, "data")
 OLD_WEB_DB = "hotovo.sqlite"     # pôvodná spoločná databáza – už sa nepoužíva
 N2000_GPKG = r"C:\_projects\MapovaniePrePS\N2000_2024.gpkg"
 N2000_TABLE = "natura2000_end2024_mapovaniePrePS"
+MAPOVATEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "skuev_mapovatel.txt")
+DATUMY_COLUMNS = ("mapovatelOK", "daphneOK", "sopOK")
+DATUMY_JSON = "datumy.json"      # dátumy odovzdania pre index.php
 
 # fotky: <cloud>\SKUEV####\f  ->  <priečinok data>\foto\SKUEV####
 FOTO_SUBDIR = "f"                # priečinok s fotkami v cloude (ako v 07)
@@ -988,6 +997,39 @@ def list_sites(data_dir):
                  akt or ""))
 
 
+def write_datumy(data_dir):
+    """Dátumy odovzdania zo skuev_mapovatel.txt -> <data>\\datumy.json.
+
+    {"SKUEV0035": {"mapovatelOK": "2026-10-08", ...}, ...} – len vyplnené
+    dátumy, vo formáte rrrr-mm-dd (zápis dd.mm.rrrr sa prevedie)."""
+    datumy = {}
+    try:
+        with open(MAPOVATEL_FILE, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f, delimiter="\t"):
+                kod = (row.get("skuev") or "").strip()
+                if not re.fullmatch(r"SKUEV\d{4}", kod):
+                    continue
+                for column in DATUMY_COLUMNS:
+                    value = (row.get(column) or "").strip()
+                    if not value:
+                        continue
+                    d = parse_datum(value)
+                    if d is None:
+                        print("   UPOZORNENIE: %s [%s]='%s' nie je dátum – "
+                              "vynechané." % (kod, column, value))
+                        continue
+                    datumy.setdefault(kod, {})[column] = d.isoformat()
+    except OSError as e:
+        print("   UPOZORNENIE: %s sa nedá prečítať (%s) – dátumy odovzdania "
+              "sa neaktualizujú." % (MAPOVATEL_FILE, e))
+        return
+    path = os.path.join(data_dir, DATUMY_JSON)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(datumy, f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(path + ".tmp", path)
+    print("Dátumy:   %s (%d území)" % (path, len(datumy)))
+
+
 def build_site_db(data_dir, site, polygons):
     """Zostaví databázu územia pod dočasným názvom a potom ňou nahradí starú,
     aby web nikdy nečítal napoly zapísaný súbor. Vráti počty riadkov."""
@@ -1035,6 +1077,7 @@ def main():
         print("POZNÁMKA: %s je pôvodná spoločná databáza, web ju už nečíta – "
               "územia z nej pridaj znova a súbor zmaž."
               % os.path.join(data_dir, OLD_WEB_DB))
+    write_datumy(data_dir)
 
     if args.list and not args.skuev:
         list_sites(data_dir)
