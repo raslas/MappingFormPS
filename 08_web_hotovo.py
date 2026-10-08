@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS polygon (
     skuev               TEXT NOT NULL,
     fid                 INTEGER,
     recordid            INTEGER,
-    polygon_id          INTEGER,
+    polygon_id          INTEGER,   -- číslo polygónu na webe = [RECORDID]
     typ_polygon         TEXT,
     podlaorta           TEXT,
     lokalita            TEXT,
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS polygon (
     e1_invaz INTEGER, e2_invaz INTEGER, e3_invaz INTEGER,
     polygon_id_form     INTEGER,
     zdroj_polygon_fk    INTEGER,
-    zdroj_polygon_id    INTEGER,
+    zdroj_polygon_id    INTEGER,   -- [RECORDID] zdrojového polygónu
     biotopy_suhrn       TEXT,
     lat REAL, lng REAL,
     lat_min REAL, lat_max REAL, lng_min REAL, lng_max REAL,
@@ -580,7 +580,7 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
             by_pid.setdefault(str(r["polygon_id"]).strip(), r)
 
     def polyname(row):
-        return "polygon_id=%s (fid=%s)" % (row["polygon_id"], row["fid"])
+        return "RECORDID=%s (fid=%s)" % (row["RECORDID"], row["fid"])
 
     # --- fotky: kľúč FotoTable ([RECORDID], staršie [polygon_id]) -> RECORDID ---
     if s_fotkami:
@@ -663,7 +663,13 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
     mapovatelia = []
     bbox = [None, None, None, None]  # lat_min, lat_max, lng_min, lng_max
 
-    for r in sorted(hlavna, key=lambda x: (x["polygon_id"] or 0, x["fid"])):
+    def recordid_key(row):
+        try:
+            return int(row["RECORDID"])
+        except (TypeError, ValueError):
+            return 0
+
+    for r in sorted(hlavna, key=lambda x: (recordid_key(x), x["fid"])):
         geom = geom_from_blob(r["geom"])
         if geom is None or geom.is_empty:
             warnings.append("%s: chýba alebo je poškodená geometria – vynechané."
@@ -760,7 +766,8 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
         polygons.append({
             "fid": r["fid"],
             "recordid": r["RECORDID"],
-            "polygon_id": r["polygon_id"],
+            # web zobrazuje [polygon_id] ako číslo polygónu – ukladá sa RECORDID
+            "polygon_id": r["RECORDID"],
             # vlastné údaje polygónu (geometria, poradie, plocha, podklad)
             "podlaorta": clean(r["podlaorta"]),
             "p": r["p"],
@@ -778,8 +785,8 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
             "e2_invaz": z_formulara("E2_invaz"),
             "e3_invaz": z_formulara("E3_invaz"),
             "polygon_id_form": r["polygon_id_form"],
-            # vlastný riadok = None; prepojený = polygon_id zdrojového polygónu
-            "zdroj_polygon_id": (src["polygon_id"] if src["fid"] != r["fid"] else None),
+            # vlastný riadok = None; prepojený = RECORDID zdrojového polygónu
+            "zdroj_polygon_id": (src["RECORDID"] if src["fid"] != r["fid"] else None),
             "zdroj_fid": (src["fid"] if src["fid"] != r["fid"] else None),
             "biotopy_suhrn": suhrn,
             "lat": round(stred_lat, COORD_PRECISION),
