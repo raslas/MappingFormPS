@@ -574,16 +574,14 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
     hlavna = con.execute("SELECT * FROM tblHabHlavna").fetchall()
     cudzie = [r for r in hlavna
               if not is_empty(r["KOD_UEV"]) and str(r["KOD_UEV"]).strip() != skuev]
-    bez_uev = [r for r in hlavna if is_empty(r["KOD_UEV"])]
     if cudzie:
         warnings.append("%d polygónov má iný [KOD_UEV] než %s – vynechané (%s)."
                         % (len(cudzie), skuev,
                            ", ".join(sorted({str(r["KOD_UEV"]) for r in cudzie}))))
-    if bez_uev:
-        warnings.append("%d polygónov nemá vyplnený [KOD_UEV] – vynechané (fid %s)."
-                        % (len(bez_uev), ", ".join(str(r["fid"]) for r in bez_uev)))
+    # polygóny dokreslené v teréne nemajú [KOD_UEV] – gpkg patrí jednému územiu,
+    # takže k nemu patria aj ony
     hlavna = [r for r in hlavna
-              if not is_empty(r["KOD_UEV"]) and str(r["KOD_UEV"]).strip() == skuev]
+              if is_empty(r["KOD_UEV"]) or str(r["KOD_UEV"]).strip() == skuev]
     if not hlavna:
         sys.exit("V %s nie je ani jeden polygón s [KOD_UEV] = '%s'." % (gpkg, skuev))
 
