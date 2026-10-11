@@ -9,6 +9,8 @@ vedené na polygóne, ktorého [RECORDID] je v tomto poli uvedené, a ten sa
 kontroluje samostatne. Počet preskočených polygónov je uvedený v reporte.
 
 Opravy zapisované do GPKG (pred zápisom sa vytvorí záloha):
+  - [KOD_UEV]                 -> nastaví sa na kód územia z parametra
+                                 (polygóny dokreslené v teréne ho nemajú)
   - prázdny [datum]           -> doplní sa z priestorovo najbližšieho polygónu s dátumom
   - [hlavny_mapovatel]        -> nastaví sa podľa skuev_mapovatel.txt,
                                  ale len ak sa od neho líši
@@ -307,7 +309,8 @@ def main():
     cur = con.cursor()
 
     hlavna = cur.execute(
-        "SELECT fid, geom, polygon_id, polygon_id_form, RECORDID, datum, hlavny_mapovatel,"
+        "SELECT fid, geom, KOD_UEV, polygon_id, polygon_id_form, RECORDID, datum,"
+        "       hlavny_mapovatel,"
         "       e0, e1, e2, e3, typ_polygon FROM tblHabHlavna"
     ).fetchall()
 
@@ -380,6 +383,17 @@ def main():
 
     def recordid_of(row):
         return None if is_empty(row["RECORDID"]) else str(row["RECORDID"])
+
+    # ---------- 1a. KOD_UEV = kód územia z parametra ----------
+    zle_uev = [r for r in hlavna if r["KOD_UEV"] != skuev]
+    if zle_uev:
+        cur.execute("UPDATE tblHabHlavna SET KOD_UEV = ? WHERE KOD_UEV IS NOT ?",
+                    (skuev, skuev))
+        povodne = sorted({"prázdne" if is_empty(r["KOD_UEV"]) else "'%s'" % r["KOD_UEV"]
+                          for r in zle_uev})
+        fixes.append("[KOD_UEV] nastavený na '%s' (%d záznamov, pôvodne %s): %s."
+                     % (skuev, len(zle_uev), ", ".join(povodne),
+                        ", ".join(polyname(r) for r in zle_uev)))
 
     # ---------- 1. datum – doplnenie z najbližšieho polygónu ----------
     centers = {row["fid"]: geom_center(row["geom"]) for row in hlavna}
