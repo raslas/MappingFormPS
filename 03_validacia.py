@@ -16,6 +16,10 @@ Opravy zapisované do GPKG (pred zápisom sa vytvorí záloha):
                                  ale len ak sa od neho líši
   - duplicitné záznamy v tblHabDruhy (zhodné vo všetkých stĺpcoch okrem fid)
                               -> ponechá sa len jeden záznam, ostatné sa zmažú
+  - duplicitné záznamy v tblHabBiotopy (zhodné [fkRECORDID], [biotop_cislo_new]
+    a [biotop_pokryv])        -> ponechá sa záznam s najviac informáciami
+                                 (opatrenia, vyplnené stĺpce), jeho prázdne
+                                 hodnoty sa doplnia zo zmazaných duplicít
   - [biotop_cislo_new]       -> kontroluje sa, že každý polygón má aspoň
                                  jeden záznam v tblHabBiotopy s vyplnenou hodnotou
   - prázdny [biotop_cislo]     -> doplní sa [kod_2002] z prevodníka
@@ -53,9 +57,6 @@ GPKG_NAME = "MapovaniePrePS.gpkg"
 KBX_EXEMPT_CODES = {c.upper() for c in (
     "BRP01", "KRO11", "KRO12", "RAS04", "SKA08", "SKA09",
     "LES11", "XX06", "VOD15a", "VOD15b", "LES",
-)}
-# ďalšie biotopy vynechané len z kontroly [kod_kbx] (kontrola kvality sa na ne vzťahuje)
-KBX_ONLY_EXEMPT_CODES = {c.upper() for c in (
     "NI", "O", "T", "V", "Vr", "Z", "IS", "G", "E", "CH", "I",
 )}
 
@@ -339,6 +340,84 @@ def main():
                          % (g["fkRECORDID"], g["NAZOV_LAT"], g["etaz"],
                             g["extra"]))
 
+    # ---------- 0b. duplicitné záznamy v tblHabBiotopy ----------
+    # [fkRECORDID] + [biotop_cislo_new] + [biotop_pokryv] musia byť unikátne;
+    # ponechá sa záznam s najviac informáciami (má opatrenia, najviac
+    # vyplnených stĺpcov), pri zhode najnižší fid
+    opatrenia_count = {}
+    for r in cur.execute("SELECT fkHabBiotopyID FROM tblHabBiotopyOpatrenia "
+                         "WHERE fkHabBiotopyID IS NOT NULL"):
+        opatrenia_count[r[0]] = opatrenia_count.get(r[0], 0) + 1
+    bio_groups = {}
+    for r in cur.execute("SELECT * FROM tblHabBiotopy ORDER BY fid").fetchall():
+        if is_empty(r["fkRECORDID"]) or is_empty(r["biotop_cislo_new"]):
+            continue
+        key = (str(r["fkRECORDID"]), r["biotop_cislo_new"].strip().upper(),
+               r["biotop_pokryv"])
+        bio_groups.setdefault(key, []).append(r)
+
+    def biotop_relevance(r):
+        filled = sum(1 for c in r.keys() if c != "fid" and not is_empty(r[c]))
+        return (opatrenia_count.get(r["id"], 0) > 0, filled, -r["fid"])
+
+    for (rec, kod, pokryv), rows in bio_groups.items():
+        if len(rows) < 2:
+            continue
+        keep = max(rows, key=biotop_relevance)
+        drop = sorted((r for r in rows if r["fid"] != keep["fid"]),
+                      key=biotop_relevance, reverse=True)
+        # prázdne hodnoty ponechaného záznamu sa doplnia zo zmazaných
+        # (z najrelevantnejšieho); rozdielne vyplnené hodnoty sa nemenia
+        merged = {}
+        conflicts = []
+        for c in keep.keys():
+            if c == "fid":
+                continue
+            others = [r[c] for r in drop if not is_empty(r[c])]
+            if is_empty(keep[c]):
+                if others:
+                    merged[c] = others[0]
+            # [biotop_cislo_new] sa líši len veľkosťou písmen/medzerami
+            # a opatrenia rôznych [id] sa presúvajú nižšie
+            elif (c not in ("id", "biotop_cislo_new")
+                  and any(v != keep[c] for v in others)):
+                conflicts.append(c)
+        if merged:
+            cur.execute("UPDATE tblHabBiotopy SET %s WHERE fid = ?"
+                        % ", ".join('"%s" = ?' % c for c in merged),
+                        list(merged.values()) + [keep["fid"]])
+        keep_id = merged.get("id", keep["id"])
+        cur.executemany("DELETE FROM tblHabBiotopy WHERE fid = ?",
+                        [(r["fid"],) for r in drop])
+        # opatrenia zmazaného záznamu s iným [id] sa presunú na ponechaný
+        # záznam (ak na pôvodné [id] už neodkazuje žiadny iný biotop)
+        moved = 0
+        if keep_id is not None:
+            for old_id in {r["id"] for r in drop
+                           if r["id"] is not None and r["id"] != keep_id}:
+                still_used = cur.execute("SELECT 1 FROM tblHabBiotopy WHERE id = ?",
+                                         (old_id,)).fetchone()
+                if still_used:
+                    continue
+                moved += cur.execute(
+                    "UPDATE tblHabBiotopyOpatrenia SET fkHabBiotopyID = ? "
+                    "WHERE fkHabBiotopyID = ?", (keep_id, old_id)).rowcount
+        details = ""
+        if merged:
+            details += ", doplnené: %s" % ", ".join("[%s]" % c for c in merged)
+        if moved:
+            details += ", presunutých %d opatrení" % moved
+        fixes.append("tblHabBiotopy: RECORDID=%s, biotop '%s' [biotop_pokryv]=%s: "
+                     "zmazaných %d duplicitných záznamov (ponechaný fid=%s%s)."
+                     % (rec, kod, pokryv, len(drop), keep["fid"], details))
+        if conflicts:
+            warnings.append("tblHabBiotopy: RECORDID=%s, biotop '%s' "
+                            "[biotop_pokryv]=%s: duplicity mali rozdielne hodnoty "
+                            "v %s – ponechané hodnoty z fid=%s."
+                            % (rec, kod, pokryv,
+                               ", ".join("[%s]" % c for c in conflicts),
+                               keep["fid"]))
+
     druhy = cur.execute("SELECT fid, fkRECORDID, etaz, kod_kbx FROM tblHabDruhy").fetchall()
     biotopy = cur.execute("SELECT * FROM tblHabBiotopy").fetchall()
     aktivity = cur.execute("SELECT fkRECORDID FROM tblAktivity").fetchall()
@@ -511,12 +590,12 @@ def main():
                 if rec not in druhy_recs:
                     add_error("Typ 'A' bez záznamu v tblHabDruhy", name)
                 rec_biotopy = biotopy_by_rec.get(rec, [])
-                # biotopy z KBX_EXEMPT_CODES / KBX_ONLY_EXEMPT_CODES sa v komplexe
+                # biotopy z KBX_EXEMPT_CODES sa v komplexe
                 # nepočítajú, takže 1 biotop + výnimka nevyžaduje [kod_kbx]
                 normal_biotopy = [b for b in rec_biotopy
                                   if is_empty(b["biotop_cislo_new"])
                                   or b["biotop_cislo_new"].strip().upper()
-                                  not in KBX_EXEMPT_CODES | KBX_ONLY_EXEMPT_CODES]
+                                  not in KBX_EXEMPT_CODES]
                 if len(rec_biotopy) > 1 and len(normal_biotopy) > 1:
                     allowed_kbx = {b["biotop_cislo_new"].strip().upper()
                                    for b in normal_biotopy
