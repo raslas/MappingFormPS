@@ -59,6 +59,15 @@ KBX_EXEMPT_CODES = {c.upper() for c in (
     "LES11", "XX06", "VOD15a", "VOD15b", "LES",
     "NI", "O", "T", "V", "Vr", "Z", "IS", "G", "E", "CH", "I",
 )}
+# biotopy Katalógu 2023, ktoré nie sú národného významu ani Natura 2000 –
+# nekontroluje sa pri nich kvalita/manažment/vyhliadky ani opatrenia
+NON_PROTECTED_CODES = {c.upper() for c in (
+    "VOD02", "VOD03", "VOD08", "VOD10", "VOD11", "VOD14", "VOD15a",
+    "BRP01", "BRP06", "BRP07", "BRP08b", "KRO04", "KRO05", "KRO11", "KRO12",
+    "SKA09", "LES11", "XX01", "XX02", "XX03a", "XX03b", "XX03c",
+    "XX04a", "XX04b", "XX04c", "XX04d", "XX04e", "XX04f",
+    "XX05", "XX06", "XX07", "XX08",
+)}
 
 
 # ----------------------------------------------------------------------
@@ -708,8 +717,9 @@ def main():
         if not (num(b["vyhliadky_biotopu_good"]) > 0 or num(b["vyhliadky_biotopu_bad"]) > 0
                 or num(b["vyhliadky_biotopu_unsiut"]) > 0):
             missing.append("vyhliadky")
-        # kvalita/manažment/vyhliadky a opatrenia sa pri KBX_EXEMPT_CODES nereportujú
-        if kod_new.upper() in KBX_EXEMPT_CODES:
+        # kvalita/manažment/vyhliadky a opatrenia sa pri KBX_EXEMPT_CODES
+        # a NON_PROTECTED_CODES nereportujú
+        if kod_new.upper() in KBX_EXEMPT_CODES | NON_PROTECTED_CODES:
             continue
         if missing:
             missing_by_poly.setdefault(parent["fid"], (parent, []))[1].append(
