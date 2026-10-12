@@ -54,6 +54,10 @@ KBX_EXEMPT_CODES = {c.upper() for c in (
     "BRP01", "KRO11", "KRO12", "RAS04", "SKA08", "SKA09",
     "LES11", "XX06", "VOD15a", "VOD15b", "LES",
 )}
+# ďalšie biotopy vynechané len z kontroly [kod_kbx] (kontrola kvality sa na ne vzťahuje)
+KBX_ONLY_EXEMPT_CODES = {c.upper() for c in (
+    "NI", "O", "T", "V", "Vr", "Z", "IS", "G", "E", "CH", "I",
+)}
 
 
 # ----------------------------------------------------------------------
@@ -507,12 +511,12 @@ def main():
                 if rec not in druhy_recs:
                     add_error("Typ 'A' bez záznamu v tblHabDruhy", name)
                 rec_biotopy = biotopy_by_rec.get(rec, [])
-                # biotopy z KBX_EXEMPT_CODES nemajú diagnostické druhy – v komplexe
-                # sa nepočítajú, takže 1 biotop + výnimka nevyžaduje [kod_kbx]
+                # biotopy z KBX_EXEMPT_CODES / KBX_ONLY_EXEMPT_CODES sa v komplexe
+                # nepočítajú, takže 1 biotop + výnimka nevyžaduje [kod_kbx]
                 normal_biotopy = [b for b in rec_biotopy
                                   if is_empty(b["biotop_cislo_new"])
                                   or b["biotop_cislo_new"].strip().upper()
-                                  not in KBX_EXEMPT_CODES]
+                                  not in KBX_EXEMPT_CODES | KBX_ONLY_EXEMPT_CODES]
                 if len(rec_biotopy) > 1 and len(normal_biotopy) > 1:
                     allowed_kbx = {b["biotop_cislo_new"].strip().upper()
                                    for b in normal_biotopy
