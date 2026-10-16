@@ -14,8 +14,12 @@ Opravy zapisované do GPKG (pred zápisom sa vytvorí záloha):
   - prázdny [datum]           -> doplní sa z priestorovo najbližšieho polygónu s dátumom
   - [hlavny_mapovatel]        -> nastaví sa podľa skuev_mapovatel.txt,
                                  ale len ak sa od neho líši
-  - duplicitné záznamy v tblHabDruhy (zhodné vo všetkých stĺpcoch okrem fid)
-                              -> ponechá sa len jeden záznam, ostatné sa zmažú
+  - duplicitné záznamy v tblHabDruhy (zhodné [fkRECORDID], [KOD] a [etaz])
+                              -> zlúčia sa do jedného záznamu bez straty
+                                 vyplnených hodnôt: najvyššia [POKRYVNOST]
+                                 a [pokryvnost_perc], prázdne stĺpce sa doplnia
+                                 zo zlúčených záznamov; záznamy s rozdielnym
+                                 [kod_kbx] ostanú samostatné (varovanie)
   - duplicitné záznamy v tblHabBiotopy (zhodné [fkRECORDID], [biotop_cislo_new]
     a [biotop_pokryv])        -> ponechá sa záznam s najviac informáciami
                                  (opatrenia, vyplnené stĺpce), jeho prázdne
@@ -68,6 +72,8 @@ NON_PROTECTED_CODES = {c.upper() for c in (
     "XX04a", "XX04b", "XX04c", "XX04d", "XX04e", "XX04f",
     "XX05", "XX06", "XX07", "XX08",
 )}
+# Braun-Blanquetova stupnica [POKRYVNOST] od najnižšej (formulár ponúka 1, 2a, 2b, 3)
+POKRYVNOST_ORDER = ["r", "+", "1", "2m", "2a", "2b", "3", "4", "5"]
 
 
 # ----------------------------------------------------------------------
@@ -329,25 +335,127 @@ def main():
     ).fetchall()
 
     # ---------- 0. duplicitné záznamy v tblHabDruhy ----------
-    # duplicita = zhoda vo všetkých stĺpcoch okrem fid; ponechá sa najnižší fid
+    # [fkRECORDID] + [KOD] + [etaz] musia byť unikátne (druh v inej etáži
+    # duplicita nie je). Duplicity sa zlúčia do jedného záznamu tak, aby sa
+    # nestratila žiadna vyplnená hodnota:
+    #   - ponechá sa záznam s najvyššou [POKRYVNOST], pri zhode s najviac
+    #     vyplnenými stĺpcami, potom najnižší fid
+    #   - [pokryvnost_perc] = najvyššia vyplnená hodnota (0 = nevyplnené)
+    #   - ostatné prázdne stĺpce sa doplnia zo zlúčených záznamov; rozdielne
+    #     vyplnené hodnoty ostanú z ponechaného záznamu a vypíše sa varovanie
+    #   - záznamy s rozdielnym vyplneným [kod_kbx] sa nezlučujú (varovanie)
     druhy_cols = [r["name"] for r in
                   cur.execute("PRAGMA table_info(tblHabDruhy)").fetchall()
                   if r["name"].lower() != "fid"]
-    group_by = ", ".join('"%s"' % c for c in druhy_cols)
-    dup_groups = cur.execute(
-        "SELECT fkRECORDID, NAZOV_LAT, etaz, COUNT(*) - 1 AS extra "
-        "FROM tblHabDruhy GROUP BY %s HAVING COUNT(*) > 1" % group_by
-    ).fetchall()
-    if dup_groups:
-        cur.execute(
-            "DELETE FROM tblHabDruhy WHERE fid NOT IN "
-            "(SELECT MIN(fid) FROM tblHabDruhy GROUP BY %s)" % group_by)
-        for g in dup_groups:
-            fixes.append("tblHabDruhy: RECORDID=%s, druh '%s' "
-                         "[etaz]='%s': zmazaných %d duplicitných záznamov "
-                         "(1 ponechaný)."
-                         % (g["fkRECORDID"], g["NAZOV_LAT"], g["etaz"],
-                            g["extra"]))
+
+    def pokryvnost_rank(r):
+        v = "" if is_empty(r["POKRYVNOST"]) else str(r["POKRYVNOST"]).strip().lower()
+        return POKRYVNOST_ORDER.index(v) if v in POKRYVNOST_ORDER else (-1 if not v else None)
+
+    def perc_value(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def druh_empty(r, c):
+        # [pokryvnost_perc] má predvolenú hodnotu 0 = nevyplnené
+        return is_empty(r[c]) or (c == "pokryvnost_perc" and perc_value(r[c]) == 0)
+
+    def druh_relevance(r):
+        filled = sum(1 for c in druhy_cols if not druh_empty(r, c))
+        return (pokryvnost_rank(r), filled, -r["fid"])
+
+    druhy_groups = {}
+    for r in cur.execute("SELECT * FROM tblHabDruhy ORDER BY fid").fetchall():
+        if is_empty(r["fkRECORDID"]) or is_empty(r["KOD"]):
+            continue
+        etaz = "" if is_empty(r["etaz"]) else r["etaz"].strip().upper()
+        druhy_groups.setdefault((str(r["fkRECORDID"]), str(r["KOD"]).strip(), etaz),
+                                []).append(r)
+
+    def kbx_of(r):
+        return "" if is_empty(r["kod_kbx"]) else r["kod_kbx"].strip().upper()
+
+    # rozdielne vyplnené [kod_kbx] = druh je diagnostický pre rôzne biotopy
+    # komplexu – takéto záznamy sa nezlučujú (zlučujú sa len záznamy s rovnakým
+    # [kod_kbx]; záznamy bez neho spolu), vypíše sa varovanie
+    druhy_merge = []
+    for (rec, kod, etaz), rows in sorted(druhy_groups.items()):
+        if len(rows) < 2:
+            continue
+        name = "RECORDID=%s, druh '%s' (KOD=%s) [etaz]='%s'" % (
+            rec, rows[0]["NAZOV_LAT"], kod, etaz)
+        kbx_values = {kbx_of(rr) for rr in rows} - {""}
+        if len(kbx_values) < 2:
+            druhy_merge.append((name, rows))
+            continue
+        warnings.append("tblHabDruhy: %s: duplicity majú rozdielne [kod_kbx] (%s) – "
+                        "ponechané ako samostatné záznamy, skontrolovať (%s)."
+                        % (name, ", ".join(sorted(kbx_values)),
+                           "; ".join("fid=%s [POKRYVNOST]=%s [kod_kbx]=%s"
+                                     % (rr["fid"], rr["POKRYVNOST"], rr["kod_kbx"])
+                                     for rr in rows)))
+        by_kbx = {}
+        for rr in rows:
+            by_kbx.setdefault(kbx_of(rr), []).append(rr)
+        for kbx, sub in sorted(by_kbx.items()):
+            if len(sub) > 1:
+                druhy_merge.append(("%s [kod_kbx]='%s'" % (name, kbx), sub))
+
+    for name, rows in druhy_merge:
+        diff_cols = [c for c in druhy_cols
+                     if c != "etaz" and len({rr[c] for rr in rows}) > 1]
+        rozdiely = "; ".join("fid=%s %s" % (rr["fid"], ", ".join(
+            "[%s]=%s" % (c, rr[c]) for c in diff_cols)) for rr in rows)
+        # neznáma hodnota [POKRYVNOST] sa nedá porovnať – len report
+        if any(pokryvnost_rank(rr) is None for rr in rows):
+            add_error("tblHabDruhy: duplicitný druh v etáži, [POKRYVNOST] mimo "
+                      "stupnice %s – zlúčiť ručne" % "/".join(POKRYVNOST_ORDER),
+                      "%s: %s" % (name, rozdiely))
+            continue
+        keep = max(rows, key=druh_relevance)
+        drop = sorted((rr for rr in rows if rr["fid"] != keep["fid"]),
+                      key=druh_relevance, reverse=True)
+        merged = {}
+        conflicts = []
+        for c in druhy_cols:
+            if c in ("POKRYVNOST", "etaz"):
+                continue
+            others = [rr[c] for rr in drop if not druh_empty(rr, c)]
+            if not others:
+                continue
+            if c == "pokryvnost_perc":
+                best = max(others + ([] if druh_empty(keep, c) else [keep[c]]),
+                           key=perc_value)
+                if druh_empty(keep, c) or perc_value(best) > perc_value(keep[c]):
+                    merged[c] = best
+            else:
+                if druh_empty(keep, c):
+                    merged[c] = others[0]
+                # [kod_kbx] sa porovnáva bez ohľadu na veľkosť písmen a medzery
+                norm = ((lambda v: str(v).strip().upper()) if c == "kod_kbx"
+                        else (lambda v: v))
+                if any(norm(v) != norm(merged.get(c, keep[c])) for v in others):
+                    conflicts.append(c)
+        if merged:
+            cur.execute("UPDATE tblHabDruhy SET %s WHERE fid = ?"
+                        % ", ".join('"%s" = ?' % c for c in merged),
+                        list(merged.values()) + [keep["fid"]])
+        cur.executemany("DELETE FROM tblHabDruhy WHERE fid = ?",
+                        [(rr["fid"],) for rr in drop])
+        fixes.append("tblHabDruhy: %s: zlúčených %d duplicitných záznamov do "
+                     "fid=%s%s%s."
+                     % (name, len(drop), keep["fid"],
+                        " ([POKRYVNOST]='%s')" % keep["POKRYVNOST"]
+                        if "POKRYVNOST" in diff_cols else "",
+                        ", doplnené: %s" % ", ".join("[%s]" % c for c in merged)
+                        if merged else ""))
+        if conflicts:
+            warnings.append("tblHabDruhy: %s: duplicity mali rozdielne hodnoty – "
+                            "ponechané %s, skontrolovať (%s)."
+                            % (name, ", ".join("[%s]=%s" % (c, merged.get(c, keep[c]))
+                                               for c in conflicts), rozdiely))
 
     # ---------- 0b. duplicitné záznamy v tblHabBiotopy ----------
     # [fkRECORDID] + [biotop_cislo_new] + [biotop_pokryv] musia byť unikátne;
