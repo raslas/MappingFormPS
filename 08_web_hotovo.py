@@ -42,6 +42,16 @@ sa pri každom spustení (aj --list) zapíšu do data\\datumy.json, z ktorého i
   druh       – tblHabDruhy (názov taxónu z tblHabDruhyLookup)
   aktivita   – tblAktivity (kód rozpísaný z tblAktivityLookup / AktivityLookup)
   foto       – fotky z priečinka "f" (súbor sa skopíruje do data\\foto)
+  predmet_ochrany – biotopy, ktoré sú predmetom ochrany územia
+               (z predmety_ochrany_SKUEV.xlsx, hárok "biotopy")
+  natura_prevod   – prevod kódov katalógu 2023 / 2002 na kód Natura 2000
+               (z botany_app.sqlite aplikácie bot)
+  Web tak na serveri nepotrebuje ani xlsx, ani katalóg. Bez zdroja sa tabuľka
+  nevytvorí a web namiesto predmetov ochrany vypíše upozornenie. Po zmene xlsx
+  alebo katalógu stačí bez prestavania území spustiť:
+
+    python 08_web_hotovo.py --predmety              # všetky územia na webe
+    python 08_web_hotovo.py --predmety SKUEV0870
 
 Prepojené formuláre ([polygon_id_form]): polygón sa uloží so svojimi vlastnými
 údajmi a s odkazom na zdrojový polygón (rovnaké pravidlo ako v 06 – hľadá sa
@@ -94,6 +104,12 @@ WEB_DATA_DIR = os.path.join(WEB_DIR, "data")
 OLD_WEB_DB = "hotovo.sqlite"     # pôvodná spoločná databáza – už sa nepoužíva
 N2000_GPKG = r"C:\_projects\MapovaniePrePS\N2000_2024.gpkg"
 N2000_TABLE = "natura2000_end2024_mapovaniePrePS"
+# predmety ochrany všetkých ÚEV (hárok "biotopy": SKUEV | kod | predmet_ochrany)
+PREDMETY_XLSX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "predmety_ochrany_SKUEV.xlsx")
+PREDMETY_SHEET = "biotopy"
+# katalógy biotopov s ekvivalentmi Natura 2000 (aplikácia bot)
+KATALOG_DB = r"C:\wamp64\www\bot\data\botany_app.sqlite"
 MAPOVATEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "skuev_mapovatel.txt")
 DATUMY_COLUMNS = ("mapovatelOK", "daphneOK", "sopOK")
@@ -224,6 +240,22 @@ CREATE INDEX IF NOT EXISTS ix_foto_polygon ON foto(polygon_fk);
 CREATE INDEX IF NOT EXISTS ix_foto_skuev ON foto(skuev);
 """
 
+# vytvoria sa len vtedy, keď sa zdroj podarilo prečítať (inak web vypíše chybu)
+PREDMETY_SCHEMA = """
+CREATE TABLE predmet_ochrany (
+    kod    TEXT PRIMARY KEY,   -- kód Natura 2000, napr. 6510, 91E0
+    nazov  TEXT
+);
+"""
+NATURA_SCHEMA = """
+CREATE TABLE natura_prevod (
+    katalog  TEXT NOT NULL,    -- 'katalog' (2023) alebo 'katalog2002'
+    kod      TEXT NOT NULL,    -- kód biotopu v katalógu
+    natura   TEXT NOT NULL,    -- kód Natura 2000
+    PRIMARY KEY (katalog, kod)
+);
+"""
+
 
 # ----------------------------------------------------------------------
 # Pomocné funkcie
@@ -331,6 +363,105 @@ def site_name(skuev):
         return row[0] if row else None
     except sqlite3.Error:
         return None
+
+
+def cell_text(value):
+    """Hodnota bunky xlsx ako text (kód 6510 môže byť uložený ako číslo)."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
+def read_predmety():
+    """Predmety ochrany všetkých území: {SKUEV####: {kod: názov}}.
+
+    Ak sa xlsx nedá prečítať, vráti (None, popis chyby)."""
+    try:
+        import openpyxl
+    except ImportError:
+        return None, "chýba balík openpyxl (pip install openpyxl)"
+    try:
+        wb = openpyxl.load_workbook(PREDMETY_XLSX, read_only=True, data_only=True)
+    except Exception as e:
+        return None, "%s sa nedá otvoriť (%s)" % (PREDMETY_XLSX, e)
+    try:
+        if PREDMETY_SHEET not in wb.sheetnames:
+            return None, "v %s chýba hárok \"%s\"" % (PREDMETY_XLSX, PREDMETY_SHEET)
+        predmety = {}
+        for row in wb[PREDMETY_SHEET].iter_rows(min_row=2, values_only=True):
+            row = tuple(row) + (None, None, None)
+            skuev, kod, nazov = (cell_text(v) for v in row[:3])
+            if normalize(skuev) and kod:
+                predmety.setdefault(normalize(skuev), {})[kod] = nazov
+        return predmety, None
+    finally:
+        wb.close()
+
+
+def read_natura_prevod():
+    """Prevod kódov katalógov na kód Natura 2000: [(katalog, kod, natura)].
+
+    Nadradený biotop bez vlastného kódu preberie kód podjednotiek, ak majú
+    všetky rovnaký. Ak sa katalóg nedá prečítať, vráti (None, popis chyby)."""
+    if not os.path.isfile(KATALOG_DB):
+        return None, "katalóg biotopov %s neexistuje" % KATALOG_DB
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % KATALOG_DB.replace("\\", "/"),
+                              uri=True)
+        rows = con.execute(
+            "SELECT source, code, details_json FROM biotopes "
+            "WHERE source IN ('katalog', 'katalog2002')").fetchall()
+        con.close()
+    except sqlite3.Error as e:
+        return None, "katalóg biotopov %s sa nedá prečítať (%s)" % (KATALOG_DB, e)
+    kody = {"katalog": {}, "katalog2002": {}}
+    deti = {}
+    for source, code, details in rows:
+        try:
+            d = json.loads(details or "{}")
+        except ValueError:
+            d = {}
+        for c in d.get("classifications") or []:
+            if c.get("system") == "Natura 2000" and c.get("code"):
+                kody[source][code] = c["code"]
+                break
+        deti.setdefault(source, {})[code] = [
+            ch.get("code") for ch in d.get("children") or []]
+    for source, by_code in deti.items():
+        for code, children in by_code.items():
+            if code in kody[source] or not children:
+                continue
+            z_deti = {kody[source].get(ch, "") for ch in children}
+            if len(z_deti) == 1 and "" not in z_deti:
+                kody[source][code] = z_deti.pop()
+    return [(source, code, natura) for source, by_code in kody.items()
+            for code, natura in by_code.items()], None
+
+
+def write_predmety(con, skuev, predmety, prevod):
+    """Zapíše tabuľky predmet_ochrany a natura_prevod (nanovo).
+
+    `predmety` / `prevod` sú výsledky read_predmety / read_natura_prevod;
+    tabuľka, ktorej zdroj chýba (None), sa nevytvorí. Vráti počet predmetov
+    ochrany územia, alebo None, ak sa nezapísali. Commit robí volajúci."""
+    # jedna transakcia – web počas prepisovania nevidí chýbajúcu tabuľku
+    if not con.in_transaction:
+        con.execute("BEGIN")
+    con.execute("DROP TABLE IF EXISTS predmet_ochrany")
+    con.execute("DROP TABLE IF EXISTS natura_prevod")
+    if prevod is not None:
+        con.execute(NATURA_SCHEMA)
+        con.executemany("INSERT INTO natura_prevod (katalog, kod, natura) "
+                        "VALUES (?,?,?)", prevod)
+    if predmety is None:
+        return None
+    con.execute(PREDMETY_SCHEMA)
+    site_predmety = predmety.get(skuev, {})
+    con.executemany("INSERT INTO predmet_ochrany (kod, nazov) VALUES (?,?)",
+                    sorted(site_predmety.items()))
+    return len(site_predmety)
 
 
 def parse_datum(value):
@@ -1042,7 +1173,7 @@ def write_datumy(data_dir):
     print("Dátumy:   %s (%d území)" % (path, len(datumy)))
 
 
-def build_site_db(data_dir, site, polygons):
+def build_site_db(data_dir, site, polygons, predmety, prevod):
     """Zostaví databázu územia pod dočasným názvom a potom ňou nahradí starú,
     aby web nikdy nečítal napoly zapísaný súbor. Vráti počty riadkov."""
     path = site_db_path(data_dir, site["kod"])
@@ -1052,6 +1183,7 @@ def build_site_db(data_dir, site, polygons):
     con = open_web_db(tmp)
     try:
         counts = write_site(con, site, polygons)
+        counts["predmety"] = write_predmety(con, site["kod"], predmety, prevod)
         con.commit()
     finally:
         con.close()
@@ -1061,6 +1193,31 @@ def build_site_db(data_dir, site, polygons):
         sys.exit("%s sa nedá prepísať (%s) – nie je otvorená inde? Nová "
                  "databáza ostala v %s." % (path, e, tmp))
     return counts
+
+
+def update_predmety(data_dir, codes, predmety, prevod):
+    """Prepíše len predmety ochrany a prevod kódov v existujúcich databázach
+    území (bez čítania cloudu a bez fotiek). Prázdne `codes` = všetky."""
+    if not codes:
+        codes = [os.path.basename(p)[:-len(".sqlite")] for p in sorted(glob.glob(
+            os.path.join(data_dir, "SKUEV[0-9][0-9][0-9][0-9].sqlite")))]
+    for code in codes:
+        path = site_db_path(data_dir, code)
+        if not os.path.isfile(path):
+            print("   %s na webe nie je – preskočené." % code)
+            continue
+        try:
+            con = sqlite3.connect(path)
+            try:
+                pocet = write_predmety(con, code, predmety, prevod)
+                con.commit()
+            finally:
+                con.close()
+        except sqlite3.Error as e:
+            print("   UPOZORNENIE: %s sa nedá zapísať (%s)." % (path, e))
+            continue
+        print("   %s  predmety ochrany: %s" % (
+            code, "nezapísané" if pocet is None else "%d biotopov" % pocet))
 
 
 # ----------------------------------------------------------------------
@@ -1079,6 +1236,9 @@ def main():
                         help="vypíše územia, ktoré sú na webe")
     parser.add_argument("--bez-fotiek", dest="bez_fotiek", action="store_true",
                         help="fotky sa nekopírujú (rýchly refresh údajov)")
+    parser.add_argument("--predmety", action="store_true",
+                        help="v databázach území na webe (alebo zadaných) len "
+                             "prepíše predmety ochrany a prevod kódov Natura 2000")
     args = parser.parse_args()
 
     data_dir = os.path.abspath(args.data)
@@ -1103,6 +1263,20 @@ def main():
                      % raw)
         if code not in codes:
             codes.append(code)
+
+    if not args.remove:
+        predmety, chyba = read_predmety()
+        if chyba:
+            print("UPOZORNENIE: predmety ochrany sa na web nezapíšu – %s." % chyba)
+        prevod, chyba = read_natura_prevod()
+        if chyba:
+            print("UPOZORNENIE: prevod kódov Natura 2000 sa na web nezapíše – %s."
+                  % chyba)
+    if args.predmety:
+        print("Predmety ochrany v databázach %s:" % data_dir)
+        update_predmety(data_dir, codes, predmety, prevod)
+        return
+
     if not codes:
         sys.exit("Zadaj aspoň jedno územie, napr.: python 08_web_hotovo.py SKUEV0870")
 
@@ -1126,7 +1300,7 @@ def main():
         folder = find_folder(code)
         site, polygons = read_site(code, folder, warnings, not args.bez_fotiek)
         _, bajtov = export_fotky(site, polygons, foto_root, warnings)
-        counts = build_site_db(data_dir, site, polygons)
+        counts = build_site_db(data_dir, site, polygons, predmety, prevod)
         print("   databáza:   %s" % site_db_path(data_dir, code))
         if code not in shown_sites(data_dir):
             warnings.append("V skuev_mapovatel.txt chýba dátum [%s] – územie "
@@ -1138,6 +1312,11 @@ def main():
         print("   biotopy:    %d, opatrenia: %d, druhy: %d, aktivity: %d"
               % (counts["biotop"], counts["opatrenie"], counts["druh"],
                  counts["aktivita"]))
+        print("   predmety:   %s" % ("nezapísané" if counts["predmety"] is None
+                                     else "%d biotopov" % counts["predmety"]))
+        if counts["predmety"] == 0:
+            warnings.append("Územie nemá v %s žiadne biotopy – predmety ochrany."
+                            % os.path.basename(PREDMETY_XLSX))
         if args.bez_fotiek:
             print("   fotky:      preskočené (--bez-fotiek)")
         else:
