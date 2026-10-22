@@ -46,12 +46,21 @@ sa pri každom spustení (aj --list) zapíšu do data\\datumy.json, z ktorého i
                (z predmety_ochrany_SKUEV.xlsx, hárok "biotopy")
   natura_prevod   – prevod kódov katalógu 2023 / 2002 na kód Natura 2000
                (z botany_app.sqlite aplikácie bot)
+  ciselnik   – kódy biotopov (PrevodKatalogy.gpkg), taxóny, aktivity
+               a opatrenia, z ktorých web ponúka hodnoty pri úprave atribútov
+  Riadky biotop, opatrenie, druh a aktivita majú [gpkg_fid] = [fid] v GPKG,
+  aby sa úprava z webu dala zapísať späť (09_import_zmeny.py).
   Web tak na serveri nepotrebuje ani xlsx, ani katalóg. Bez zdroja sa tabuľka
   nevytvorí a web namiesto predmetov ochrany vypíše upozornenie. Po zmene xlsx
   alebo katalógu stačí bez prestavania území spustiť:
 
     python 08_web_hotovo.py --predmety              # všetky územia na webe
     python 08_web_hotovo.py --predmety SKUEV0870
+
+Úpravy atribútov z webu sa ukladajú do data\\zmeny.sqlite – tento súbor patrí
+webu (na serveri sa nikdy neprepisuje ani nemaže) a skript ho nečíta. Web po
+pregenerovaní databázy územia neprenesené zmeny sám znova použije (pri prvom
+otvorení územia), takže sa nestratia. Do GPKG ich zapíše 09_import_zmeny.py.
 
 Prepojené formuláre ([polygon_id_form]): polygón sa uloží so svojimi vlastnými
 údajmi a s odkazom na zdrojový polygón (rovnaké pravidlo ako v 06 – hľadá sa
@@ -99,6 +108,7 @@ except Exception:
 CLOUD_DIR = r"C:\Users\RASLAS\QField\cloud"
 GPKG_NAME = "MapovaniePrePS.gpkg"
 AKTIVITY_GPKG = "AktivityLookup.gpkg"
+PREVOD_GPKG = "PrevodKatalogy.gpkg"   # kódy biotopov 2002/2023 (ako vo formulári)
 WEB_DIR = r"C:\wamp64\www\MapovaniePrePSHotovo"
 WEB_DATA_DIR = os.path.join(WEB_DIR, "data")
 OLD_WEB_DB = "hotovo.sqlite"     # pôvodná spoločná databáza – už sa nepoužíva
@@ -189,7 +199,14 @@ CREATE TABLE IF NOT EXISTS biotop (
     pokryv      INTEGER,
     kvalita     TEXT,
     manazment   TEXT,
-    vyhliadky   TEXT
+    vyhliadky   TEXT,
+    gpkg_fid    INTEGER,   -- [fid] v tblHabBiotopy (úpravy z webu)
+    -- pôvodné percentá (zdroj textov kvalita/manazment/vyhliadky – úpravy z webu)
+    kvalita_biotopu_good INTEGER, kvalita_biotopu_bad INTEGER,
+    kvalita_biotopu_unsiut INTEGER,
+    manazment_biotopu_vhod INTEGER, manazment_biotopu_nevhod INTEGER,
+    vyhliadky_biotopu_good INTEGER, vyhliadky_biotopu_bad INTEGER,
+    vyhliadky_biotopu_unsiut INTEGER
 );
 CREATE TABLE IF NOT EXISTS opatrenie (
     id          INTEGER PRIMARY KEY,
@@ -197,7 +214,8 @@ CREATE TABLE IF NOT EXISTS opatrenie (
     kod         TEXT,
     nazov       TEXT,
     opis        TEXT,
-    percento    INTEGER
+    percento    INTEGER,
+    gpkg_fid    INTEGER    -- [fid] v tblHabBiotopyOpatrenia
 );
 CREATE TABLE IF NOT EXISTS druh (
     id                INTEGER PRIMARY KEY,
@@ -209,7 +227,8 @@ CREATE TABLE IF NOT EXISTS druh (
     etaz              TEXT,
     pokryvnost_perc   INTEGER,
     kod_kb            TEXT,
-    charakteristicky  TEXT
+    charakteristicky  TEXT,
+    gpkg_fid          INTEGER    -- [fid] v tblHabDruhy
 );
 CREATE TABLE IF NOT EXISTS aktivita (
     id           INTEGER PRIMARY KEY,
@@ -218,7 +237,8 @@ CREATE TABLE IF NOT EXISTS aktivita (
     nazov        TEXT,
     intenzita    TEXT,
     perc_plochy  INTEGER,
-    vplyv        TEXT
+    vplyv        TEXT,
+    gpkg_fid     INTEGER    -- [fid] v tblAktivity
 );
 CREATE TABLE IF NOT EXISTS foto (
     id           INTEGER PRIMARY KEY,
@@ -231,13 +251,25 @@ CREATE TABLE IF NOT EXISTS foto (
     poznamka     TEXT,             -- poznámka z FotoTable (ako sa priradila)
     bajtov       INTEGER
 );
+-- číselníky pre úpravy z webu (kódy biotopov, taxóny, aktivity, opatrenia)
+CREATE TABLE IF NOT EXISTS ciselnik (
+    typ    TEXT NOT NULL,   -- biotop2023, biotop2002, taxon, aktivita, opatrenie
+    kod    TEXT NOT NULL,
+    nazov  TEXT,
+    PRIMARY KEY (typ, kod)
+);
 CREATE INDEX IF NOT EXISTS ix_polygon_skuev ON polygon(skuev);
+CREATE INDEX IF NOT EXISTS ix_polygon_fid ON polygon(fid);
 CREATE INDEX IF NOT EXISTS ix_biotop_polygon ON biotop(polygon_fk);
 CREATE INDEX IF NOT EXISTS ix_opatrenie_biotop ON opatrenie(biotop_fk);
 CREATE INDEX IF NOT EXISTS ix_druh_polygon ON druh(polygon_fk);
 CREATE INDEX IF NOT EXISTS ix_aktivita_polygon ON aktivita(polygon_fk);
 CREATE INDEX IF NOT EXISTS ix_foto_polygon ON foto(polygon_fk);
 CREATE INDEX IF NOT EXISTS ix_foto_skuev ON foto(skuev);
+CREATE INDEX IF NOT EXISTS ix_biotop_gpkg ON biotop(gpkg_fid);
+CREATE INDEX IF NOT EXISTS ix_opatrenie_gpkg ON opatrenie(gpkg_fid);
+CREATE INDEX IF NOT EXISTS ix_druh_gpkg ON druh(gpkg_fid);
+CREATE INDEX IF NOT EXISTS ix_aktivita_gpkg ON aktivita(gpkg_fid);
 """
 
 # vytvoria sa len vtedy, keď sa zdroj podarilo prečítať (inak web vypíše chybu)
@@ -676,6 +708,48 @@ def export_fotky(site, polygons, foto_root, warnings):
 # Načítanie jedného územia z GPKG
 # ----------------------------------------------------------------------
 
+def read_ciselnik(folder, biotopy2002, biotopy2023, taxony,
+                  opatrenia_lookup, aktivity_lookup, warnings):
+    """Číselníky pre úpravy z webu: [(typ, kod, nazov)].
+
+    Kódy biotopov sú tie, ktoré ponúka formulár (PrevodKatalogy, first_20xx = 1);
+    názov sa berie z lookupu GPKG ako pri zobrazení, inak z prevodníka."""
+    rows = {}
+
+    def add(typ, kod, nazov):
+        kod = clean(kod)
+        if kod is None or kod == "-":
+            return
+        rows.setdefault((typ, str(kod)), clean(nazov))
+
+    prevod = os.path.join(folder, PREVOD_GPKG)
+    if not os.path.isfile(prevod):
+        prevod = os.path.join(os.path.dirname(os.path.abspath(__file__)), PREVOD_GPKG)
+    try:
+        pcon = sqlite3.connect("file:%s?mode=ro" % prevod.replace("\\", "/"), uri=True)
+        for kod, nazov in pcon.execute(
+                "SELECT kod_2023, nazov_2023 FROM PrevodKatalogy WHERE first_2023 = 1"):
+            add("biotop2023", kod, biotopy2023.get(clean(kod) or "") or nazov)
+        for kod, nazov in pcon.execute(
+                "SELECT kod_2002, nazov_2002 FROM PrevodKatalogy WHERE first_2002 = 1"):
+            add("biotop2002", kod, biotopy2002.get(clean(kod) or "") or nazov)
+        pcon.close()
+    except sqlite3.Error as e:
+        warnings.append("%s sa nedá čítať (%s) – kódy biotopov pre úpravy z webu "
+                        "sa vezmú z lookupov GPKG." % (prevod, e))
+        for kod, nazov in biotopy2023.items():
+            add("biotop2023", kod, nazov)
+        for kod, nazov in biotopy2002.items():
+            add("biotop2002", kod, nazov)
+    for kod, nazov in taxony.items():
+        add("taxon", kod, nazov)
+    for kod, nazov in opatrenia_lookup.items():
+        add("opatrenie", kod, nazov)
+    for kod, nazov in aktivity_lookup.items():
+        add("aktivita", kod, nazov)
+    return [(typ, kod, nazov) for (typ, kod), nazov in sorted(rows.items())]
+
+
 def read_site(skuev, folder, warnings, s_fotkami=True):
     """Prečíta údaje územia z GPKG a vráti (skuev_riadok, polygóny).
 
@@ -876,11 +950,14 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
                 "kvalita": percenta(b, KVALITA),
                 "manazment": percenta(b, MANAZMENT),
                 "vyhliadky": percenta(b, VYHLIADKY),
+                "gpkg_fid": b["fid"],
+                "percenta": {c: b[c] for c, _ in KVALITA + MANAZMENT + VYHLIADKY},
                 "opatrenia": [{
                     "kod": clean(o["kod_opatrenia"]),
                     "nazov": opatrenia_lookup.get(clean(o["kod_opatrenia"]) or ""),
                     "opis": clean(o["detailny_opis_opatrenia"]),
                     "percento": o["percento_z_plochy_biotopu"],
+                    "gpkg_fid": o["fid"],
                 } for o in opatrenia_by_biotop.get(b["fid"], [])],
             })
         suhrn = "; ".join(
@@ -897,6 +974,7 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
             "pokryvnost_perc": d["pokryvnost_perc"],
             "kod_kb": clean(d["kod_kbx"]),
             "charakteristicky": clean(d["is_characetristic"]),
+            "gpkg_fid": d["fid"],
         } for d in sorted(druhy_by_rec.get(src_rec) or [],
                           key=lambda x: (x["etaz"] or "", x["NAZOV_LAT"] or ""))]
 
@@ -906,6 +984,7 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
             "intenzita": clean(a["Intenzita"]),
             "perc_plochy": a["Perc_Plochy"],
             "vplyv": clean(a["Vplyv"]),
+            "gpkg_fid": a["fid"],
         } for a in aktivity_by_rec.get(src_rec) or []]
 
         polygons.append({
@@ -947,6 +1026,8 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
             "vlastne_data": own_rec == src_rec,
         })
 
+    ciselnik = read_ciselnik(folder, biotopy2002, biotopy2023, taxony,
+                             opatrenia_lookup, aktivity_lookup, warnings)
     con.close()
 
     # fotky polygónov, ktoré sa do exportu nedostali (vynechaná geometria)
@@ -968,6 +1049,7 @@ def read_site(skuev, folder, warnings, s_fotkami=True):
         "lng_min": bbox[2], "lng_max": bbox[3],
         "zdroj": gpkg,
         "aktualizovane": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "ciselnik": ciselnik,
     }
     return site, polygons
 
@@ -1058,36 +1140,41 @@ def write_site(con, site, polygons):
         fk_by_fid[p["fid"]] = pfk
 
         for b in p["biotopy"]:
+            perc_cols = [c for c, _ in KVALITA + MANAZMENT + VYHLIADKY]
             bcur = con.execute(
                 "INSERT INTO biotop (polygon_fk, poradie, kod2002, nazov2002, "
-                "kod2023, nazov2023, pokryv, kvalita, manazment, vyhliadky) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (pfk, b["poradie"], b["kod2002"], b["nazov2002"], b["kod2023"],
+                "kod2023, nazov2023, pokryv, kvalita, manazment, vyhliadky, "
+                "gpkg_fid, %s) VALUES (%s)"
+                % (", ".join(perc_cols), ",".join("?" * (11 + len(perc_cols)))),
+                [pfk, b["poradie"], b["kod2002"], b["nazov2002"], b["kod2023"],
                  b["nazov2023"], b["pokryv"], b["kvalita"], b["manazment"],
-                 b["vyhliadky"]))
+                 b["vyhliadky"], b["gpkg_fid"]]
+                + [b["percenta"][c] for c in perc_cols])
             counts["biotop"] += 1
             for o in b["opatrenia"]:
                 con.execute(
-                    "INSERT INTO opatrenie (biotop_fk, kod, nazov, opis, percento) "
-                    "VALUES (?,?,?,?,?)",
-                    (bcur.lastrowid, o["kod"], o["nazov"], o["opis"], o["percento"]))
+                    "INSERT INTO opatrenie (biotop_fk, kod, nazov, opis, percento, "
+                    "gpkg_fid) VALUES (?,?,?,?,?,?)",
+                    (bcur.lastrowid, o["kod"], o["nazov"], o["opis"], o["percento"],
+                     o["gpkg_fid"]))
                 counts["opatrenie"] += 1
 
         for d in p["druhy"]:
             con.execute(
                 "INSERT INTO druh (polygon_fk, kod, nazov_lat, taxon, pokryvnost, "
-                "etaz, pokryvnost_perc, kod_kb, charakteristicky) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "etaz, pokryvnost_perc, kod_kb, charakteristicky, gpkg_fid) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (pfk, d["kod"], d["nazov_lat"], d["taxon"], d["pokryvnost"],
-                 d["etaz"], d["pokryvnost_perc"], d["kod_kb"], d["charakteristicky"]))
+                 d["etaz"], d["pokryvnost_perc"], d["kod_kb"], d["charakteristicky"],
+                 d["gpkg_fid"]))
             counts["druh"] += 1
 
         for a in p["aktivity"]:
             con.execute(
                 "INSERT INTO aktivita (polygon_fk, kod, nazov, intenzita, "
-                "perc_plochy, vplyv) VALUES (?,?,?,?,?,?)",
+                "perc_plochy, vplyv, gpkg_fid) VALUES (?,?,?,?,?,?,?)",
                 (pfk, a["kod"], a["nazov"], a["intenzita"], a["perc_plochy"],
-                 a["vplyv"]))
+                 a["vplyv"], a["gpkg_fid"]))
             counts["aktivita"] += 1
 
         counts["foto"] += insert_fotky(con, site["kod"], pfk, p["fotky"])
@@ -1095,6 +1182,10 @@ def write_site(con, site, polygons):
     # fotky bez polygónu (web ich môže vypísať zvlášť)
     counts["foto"] += insert_fotky(con, site["kod"], None,
                                    site["fotky_nepriradene"])
+
+    con.executemany("INSERT INTO ciselnik (typ, kod, nazov) VALUES (?,?,?)",
+                    site["ciselnik"])
+    counts["ciselnik"] = len(site["ciselnik"])
 
     # odkaz na zdrojový polygón sa dá vyplniť až keď sú vložené všetky riadky
     for p in polygons:
