@@ -43,6 +43,8 @@ Prepojené formuláre ([polygon_id_form]):
 Nové stĺpce (skrátené na 10 znakov kvôli DBF):
   pid_form  = [polygon_id_form] daného riadku (vlastná hodnota, nie zo zdroja)
   typ_polyg = [typ_polygon] (pri prepojenom formulári zo zdrojového polygónu)
+  p         = plocha polygónu v m² vypočítaná z jeho vlastnej geometrie
+              (nie [p] z gpkg, ktoré môže byť zastarané po úpravách v QField)
 
 Vyžaduje: osgeo (GDAL) – interpreter s GDAL, napr.
   C:\\Users\\RASLAS\\AppData\\Local\\Programs\\Python\\Python314\\python.exe
@@ -93,6 +95,7 @@ FIELDS = [
     ("biotopy", ogr.OFTString, 254, 0),  # G3: 'biotopy_all' skrátené na ≤10
     ("pid_form", ogr.OFTInteger, 10, 0),  # [polygon_id_form]
     ("typ_polyg", ogr.OFTString, 1, 0),   # [typ_polygon]
+    ("p", ogr.OFTReal, 14, 2),            # plocha (m²) z vlastnej geometrie
 ]
 
 
@@ -428,6 +431,8 @@ def export_site(skuev, mappers, site_mappers):
                     % (pid, id_polygon, geom.GetGeometryCount()))
         if geom is not None:
             feat.SetGeometry(geom)
+            # plocha vždy z vlastnej geometrie (EPSG:5514 je metrický → m²)
+            feat.SetField("p", round(geom.GetArea(), 2))
         else:
             warnings.append("polygon_id=%s: chýba geometria" % pid)
 
