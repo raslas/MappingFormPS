@@ -12,6 +12,7 @@
 !03_update_cloud_qgs.py
 !04_update_all_cloud_projects.py
 !03_validacia.py
+!test_03_validacia.py
 !04_validacia_foto.py
 !05_export_shapefile.py
 !06_naplnenie_access.py

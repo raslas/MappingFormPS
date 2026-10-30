@@ -30,6 +30,11 @@ Opravy zapisované do GPKG (pred zápisom sa vytvorí záloha):
                                  tblHabMapping_kod2002_kod2023.txt podľa
                                  [biotop_cislo_new]=[kod_2023]; ak má kód viac
                                  možností, zapíše sa iba varovanie
+  - prázdny [kod_kbx] v komplexe biotopov (žiadny druh polygónu nemá [kod_kbx]
+    z [biotop_cislo_new])     -> druhom polygónu, ktoré sú podľa Katalógu
+                                 biotopov 2023 diagnostické pre menšinový
+                                 biotop, sa doplní jeho kód; ak sa žiaden
+                                 nenájde, zapíše sa chyba
 
 Ostatné pravidlá sa iba reportujú ako chyby (konzola + textový súbor
 SKUEV####_ValidationReport_YYYYMMDD_HHMM.txt v priečinku SKUEV####).
@@ -55,6 +60,7 @@ CLOUD_DIR = r"C:\Users\RASLAS\QField\cloud"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAPOVATEL_FILE = os.path.join(SCRIPT_DIR, "skuev_mapovatel.txt")
 MAPPING_FILE = os.path.join(SCRIPT_DIR, "tblHabMapping_kod2002_kod2023.txt")
+CATALOG_ACCDB = r"C:\sr\katalogy\OK_katalog_biotopov_79MB.accdb"
 GPKG_NAME = "MapovaniePrePS.gpkg"
 # biotopy bez diagnostických druhov – nepočítajú sa do komplexu pri kontrole [kod_kbx]
 # (porovnáva sa s kódom prevedeným na veľké písmená, preto .upper())
@@ -267,6 +273,130 @@ def resolve_multi_kod(candidates):
         if re.search(r"[A-Za-z]$", c):
             bases.add(re.sub(r"[A-Za-z]+$", "", c))
     return next(iter(bases)) if len(bases) == 1 else None
+
+
+def species_key(name):
+    """Kľúč latinského názvu na porovnanie bez ohľadu na zápis.
+
+    Vynechá sa '(E3...', 'agg.', 'sp.' a 'spec. div.'. Medzery a pomlčky sa
+    zahadzujú, lebo katalóg je extrahovaný z PDF a má v názvoch rozdelené slová
+    ('Spirodela poly rhiza', 'Capsella bursa- -pastoris').
+    """
+    name = re.sub(r"\s*\(.*$", "", name.strip())
+    name = re.sub(r"\s+(agg\.|sp\.|spec\. div\.)$", "", name)
+    return re.sub(r"[\s-]+", "", name).lower()
+
+
+def species_keys(name, groups):
+    """Všetky kľúče, pod ktorými sa druh z terénu hľadá v katalógu.
+
+    Poddruh sa hľadá aj ako druh a druh aj ako agregát, do ktorého patrí.
+    """
+    keys = {species_key(name)}
+    m = re.match(r"(\S+\s+\S+)\s+(subsp|ssp|var|f)\.", name.strip())
+    if m:
+        keys.add(species_key(m.group(1)))
+    for k in list(keys):
+        keys |= groups.get(k, set())
+    return keys
+
+
+def load_diag_species(path):
+    """Načíta diagnostické druhy biotopov z Katalógu biotopov 2023 (len čítanie).
+
+    Vráti (diag, groups):
+      diag   = {'LKP01': {kľúč druhu: {etáže}}} – kód veľkými písmenami,
+               None medzi etážami = druh platí v ľubovoľnej etáži
+      groups = {kľúč taxónu: {kľúče agregátov, do ktorých patrí}}
+    """
+    import pyodbc  # len tu – bez ovládača validácia beží ďalej bez dopĺňania
+
+    con = pyodbc.connect(
+        r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=%s;ReadOnly=1" % path,
+        readonly=True)
+    try:
+        cur = con.cursor()
+        diag = {}
+        last = None
+        # rola 'Diagnostický' aj 'Diagnostický a dominantný'
+        for code, name, stratum in cur.execute(
+                "SELECT b.BiotopCode, s.SpeciesName, bs.Stratum "
+                "FROM ((tblBiotopSpecies AS bs "
+                "INNER JOIN tblBiotop AS b ON b.BiotopID = bs.BiotopID) "
+                "INNER JOIN tblSpecies AS s ON s.SpeciesID = bs.SpeciesID) "
+                "INNER JOIN tblSpeciesRole AS r ON r.RoleID = bs.RoleID "
+                "WHERE r.RoleName LIKE 'Diagnostick%' "
+                "ORDER BY bs.BiotopID, bs.SortOrder").fetchall():
+            # 'Alnus incana (E3, E2)' je v katalógu rozdelené na dva záznamy:
+            # 'Alnus incana (E3' a 'E2)'
+            m = re.fullmatch(r"(E\d)\)", name.strip())
+            if m:
+                if last is not None:
+                    last.add(m.group(1))
+                continue
+            m = re.search(r"\((E\d)", name)
+            last = diag.setdefault(code.strip().upper(), {}).setdefault(
+                species_key(name), set())
+            last.add(stratum or (m.group(1) if m else None))
+
+        # nadradené kódy (LKP03, VOD01) zdedia druhy svojich podjednotiek
+        rows = cur.execute("SELECT BiotopID, BiotopCode, ParentBiotopID "
+                           "FROM tblBiotop").fetchall()
+        codes = {r[0]: r[1].strip().upper() for r in rows}
+        for r in rows:
+            if r[2] is None or r[2] not in codes:
+                continue
+            parent = diag.setdefault(codes[r[2]], {})
+            for key, strata in diag.get(codes[r[0]], {}).items():
+                parent.setdefault(key, set()).update(strata)
+
+        groups = {}
+        for group, taxa in cur.execute(
+                "SELECT GroupName, IncludedTaxaFull FROM tblTaxonomickaSkupina "
+                "WHERE IncludedTaxaFull IS NOT NULL").fetchall():
+            for taxon in taxa.split(";"):
+                if taxon.strip():
+                    groups.setdefault(species_key(taxon), set()).add(species_key(group))
+    finally:
+        con.close()
+    return diag, groups
+
+
+def minority_biotopes(covers):
+    """Menšinové biotopy komplexu z {kód: pokryvnosť}, zoradené podľa kódu.
+
+    Sú to tie s pokryvnosťou nižšou ako najvyššia v komplexe; ak majú všetky
+    rovnakú pokryvnosť, menšinový nie je žiadny a vrátia sa všetky.
+    """
+    top = max(covers.values())
+    return sorted(k for k, v in covers.items() if v < top) or sorted(covers)
+
+
+def find_kbx_fills(rows, covers, diag, groups):
+    """Vyberie druhy polygónu, ktorým sa doplní [kod_kbx] -> {kód: [záznamy]}.
+
+    Berú sa záznamy tblHabDruhy bez [kod_kbx], ktorých druh je diagnostický
+    pre menšinový biotop v rovnakej etáži, ako uvádza katalóg. Druh diagnostický
+    aj pre iný biotop komplexu sa nepoužije – biotopy od seba neodlišuje.
+    """
+    result = {}
+    for kod in minority_biotopes(covers):
+        species = diag.get(kod.upper(), {})
+        others = [diag.get(k.upper(), {}) for k in covers if k != kod]
+        for r in rows:
+            if is_empty(r["NAZOV_LAT"]) or not is_empty(r["kod_kbx"]):
+                continue
+            keys = species_keys(r["NAZOV_LAT"], groups)
+            strata = set().union(*(species[k] for k in keys if k in species))
+            if not strata:
+                continue
+            etaz = "" if is_empty(r["etaz"]) else r["etaz"].strip().upper()
+            if etaz and None not in strata and etaz not in strata:
+                continue
+            if any(keys & other.keys() for other in others):
+                continue
+            result.setdefault(kod, []).append(r)
+    return result
 
 
 def ask_skuev():
@@ -535,7 +665,8 @@ def main():
                                ", ".join("[%s]" % c for c in conflicts),
                                keep["fid"]))
 
-    druhy = cur.execute("SELECT fid, fkRECORDID, etaz, kod_kbx FROM tblHabDruhy").fetchall()
+    druhy = cur.execute("SELECT fid, fkRECORDID, etaz, kod_kbx, NAZOV_LAT "
+                        "FROM tblHabDruhy").fetchall()
     biotopy = cur.execute("SELECT * FROM tblHabBiotopy").fetchall()
     aktivity = cur.execute("SELECT fkRECORDID FROM tblAktivity").fetchall()
     opatrenia = cur.execute("SELECT fkHabBiotopyID FROM tblHabBiotopyOpatrenia").fetchall()
@@ -551,9 +682,13 @@ def main():
     for r in biotopy:
         if not is_empty(r["fkRECORDID"]):
             biotopy_by_rec.setdefault(str(r["fkRECORDID"]), []).append(r)
+    druhy_by_rec = {}
     druhy_kbx_by_rec = {}
     for r in druhy:
-        if not is_empty(r["fkRECORDID"]) and not is_empty(r["kod_kbx"]):
+        if is_empty(r["fkRECORDID"]):
+            continue
+        druhy_by_rec.setdefault(str(r["fkRECORDID"]), []).append(r)
+        if not is_empty(r["kod_kbx"]):
             druhy_kbx_by_rec.setdefault(str(r["fkRECORDID"]), set()).add(
                 r["kod_kbx"].strip().upper())
     aktivity_recs = {str(r["fkRECORDID"]) for r in aktivity if not is_empty(r["fkRECORDID"])}
@@ -638,6 +773,43 @@ def main():
                          "(%d záznamov zmenených)." % (mapovatel, cur.rowcount))
 
     # ---------- 3. kontroly tblHabHlavna ----------
+    try:
+        diag_species, species_groups = load_diag_species(CATALOG_ACCDB)
+    except Exception as e:
+        diag_species = None
+        add_error("Katalóg biotopov sa nedá čítať – [kod_kbx] nebol doplnený",
+                  "%s: %s" % (CATALOG_ACCDB, e))
+
+    def fill_kod_kbx(row, rec, normal_biotopy):
+        """Doplní [kod_kbx] podľa diagnostických druhov menšinového biotopu.
+
+        Vráti None, ak sa niečo doplnilo, inak dôvod na doplnenie do chyby.
+        """
+        if diag_species is None:
+            return "katalóg biotopov nie je dostupný"
+        biotopy_kod = [b for b in normal_biotopy if not is_empty(b["biotop_cislo_new"])]
+        if any(is_empty(b["biotop_pokryv"]) for b in biotopy_kod):
+            return "menšinový biotop sa nedá určiť, chýba [biotop_pokryv]"
+        covers = {}
+        for b in biotopy_kod:
+            kod = b["biotop_cislo_new"].strip()
+            covers[kod] = covers.get(kod, 0) + perc_value(b["biotop_pokryv"])
+        fills = find_kbx_fills(druhy_by_rec.get(rec, []), covers,
+                               diag_species, species_groups)
+        if not fills:
+            return ("v polygóne nie je diagnostický druh pre %s"
+                    % ", ".join(minority_biotopes(covers)))
+        for kod, rows in sorted(fills.items()):
+            cur.executemany("UPDATE tblHabDruhy SET kod_kbx = ? WHERE fid = ?",
+                            [(kod, r["fid"]) for r in rows])
+            druhy_kbx_by_rec.setdefault(rec, set()).add(kod.upper())
+            fixes.append("tblHabDruhy: %s: [kod_kbx] doplnený na '%s' (pokryvnosť "
+                         "biotopu %g) pre diagnostické druhy katalógu (%d): %s."
+                         % (polyname(row), kod, covers[kod], len(rows),
+                            ", ".join("%s [%s]" % (r["NAZOV_LAT"].strip(), r["etaz"])
+                                      for r in rows)))
+        return None
+
     # [RECORDID] musí byť jedinečné: je to kľúč pre podriadené tabuľky, cieľ
     # odkazov z [polygon_id_form] aj základ zloženého RECORDID v Access DB
     # (tam je na ňom jedinečný index, takže duplicita = stratený polygón).
@@ -722,10 +894,13 @@ def main():
                         add_error("Typ 'A' s viacerými biotopmi, žiadny nemá "
                                   "[biotop_cislo_new] pre kontrolu [kod_kbx]", name)
                     elif not (have_kbx & allowed_kbx):
-                        add_error("Typ 'A' s viacerými biotopmi, žiadny druh "
-                                  "v tblHabDruhy nemá [kod_kbx] z [biotop_cislo_new] "
-                                  "(uvedené povolené kódy)",
-                                  "%s: %s" % (name, ", ".join(sorted(allowed_kbx))))
+                        dovod = fill_kod_kbx(row, rec, normal_biotopy)
+                        if dovod:
+                            add_error("Typ 'A' s viacerými biotopmi, žiadny druh "
+                                      "v tblHabDruhy nemá [kod_kbx] z [biotop_cislo_new] "
+                                      "(uvedené povolené kódy)",
+                                      "%s: %s (%s)" % (name, ", ".join(sorted(allowed_kbx)),
+                                                       dovod))
 
     # ---------- 4. biotop_cislo_new – kontrola a doplnenie biotop_cislo ----------
     biotopy_new_recs = {str(r["fkRECORDID"]) for r in biotopy
