@@ -24,6 +24,13 @@ Opravy zapisované do GPKG (pred zápisom sa vytvorí záloha):
     a [biotop_pokryv])        -> ponechá sa záznam s najviac informáciami
                                  (opatrenia, vyplnené stĺpce), jeho prázdne
                                  hodnoty sa doplnia zo zmazaných duplicít
+  - duplicitné záznamy v tblAktivity (zhodné [fkRECORDID] a [Aktivita])
+    a v tblHabBiotopyOpatrenia (zhodné [fkHabBiotopyID] a [kod_opatrenia])
+                              -> zmažú sa, ponechá sa záznam s najviac
+                                 vyplnenými stĺpcami a jeho prázdne hodnoty sa
+                                 doplnia zo zmazaných; ak majú duplicity
+                                 rozdielne vyplnené hodnoty, nezlučujú sa
+                                 (varovanie)
   - [biotop_cislo_new]       -> kontroluje sa, že každý polygón má aspoň
                                  jeden záznam v tblHabBiotopy s vyplnenou hodnotou
   - prázdny [biotop_cislo]     -> doplní sa [kod_2002] z prevodníka
@@ -399,6 +406,91 @@ def find_kbx_fills(rows, covers, diag, groups):
     return result
 
 
+def plan_dedup(rows, key_cols, value_cols, zero_empty=()):
+    """Nájde duplicitné záznamy (zhodné key_cols) a navrhne ich zlúčenie.
+
+    rows: záznamy s kľúčom 'fid' (sqlite3.Row alebo dict). Kľúč sa porovnáva
+    bez ohľadu na veľkosť písmen a medzery; záznamy s prázdnym kľúčom sa
+    preskočia. Stĺpce v zero_empty majú predvolenú hodnotu 0 = nevyplnené.
+
+    Vráti (merges, conflicts):
+      merges    – [(key, keep, drop, fill)]: záznamy drop sa zmažú, do keep
+                  sa zapíšu hodnoty fill {stĺpec: hodnota} (doplnené prázdne
+                  stĺpce). Ponechá sa záznam s najviac vyplnenými stĺpcami,
+                  pri zhode najnižší fid.
+      conflicts – [(key, rows, diff_cols)]: skupiny, kde majú duplicity
+                  rozdielne vyplnené hodnoty. Takéto záznamy sa nezlučujú
+                  (zlúčia sa len navzájom úplne zhodné záznamy), iba sa
+                  reportujú.
+    """
+    def empty(r, c):
+        if is_empty(r[c]):
+            return True
+        if c in zero_empty:
+            try:
+                return float(r[c]) == 0
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    def norm(v):
+        if isinstance(v, str):
+            v = v.strip()
+            try:
+                return float(v.replace(",", "."))
+            except ValueError:
+                return v.casefold()
+        if isinstance(v, (int, float)):
+            return float(v)
+        return v
+
+    def filled_values(r):
+        return tuple(None if empty(r, c) else norm(r[c]) for c in value_cols)
+
+    def relevance(r):
+        return (sum(1 for c in value_cols if not empty(r, c)), -r["fid"])
+
+    def merge(key, group):
+        keep = max(group, key=relevance)
+        drop = sorted((r for r in group if r["fid"] != keep["fid"]),
+                      key=relevance, reverse=True)
+        fill = {}
+        for c in value_cols:
+            if empty(keep, c):
+                others = [r[c] for r in drop if not empty(r, c)]
+                if others:
+                    fill[c] = others[0]
+        return (key, keep, drop, fill)
+
+    groups = {}
+    for r in sorted(rows, key=lambda x: x["fid"]):
+        if any(is_empty(r[c]) for c in key_cols):
+            continue
+        key = tuple(str(r[c]).strip().upper() for c in key_cols)
+        groups.setdefault(key, []).append(r)
+
+    def natural(item):  # RECORDID 46 pred 206
+        return tuple((0, int(k), "") if k.isdigit() else (1, 0, k) for k in item[0])
+
+    merges, conflicts = [], []
+    for key, group in sorted(groups.items(), key=natural):
+        if len(group) < 2:
+            continue
+        diff_cols = [c for c in value_cols
+                     if len({norm(r[c]) for r in group if not empty(r, c)}) > 1]
+        if not diff_cols:
+            merges.append(merge(key, group))
+            continue
+        conflicts.append((key, group, diff_cols))
+        same = {}
+        for r in group:
+            same.setdefault(filled_values(r), []).append(r)
+        for sub in same.values():
+            if len(sub) > 1:
+                merges.append(merge(key, sub))
+    return merges, conflicts
+
+
 def ask_skuev():
     raw = (sys.argv[1] if len(sys.argv) > 1
            else input("Zadaj kód územia SKUEV (napr. SKUEV0903): ")).strip().upper()
@@ -664,6 +756,57 @@ def main():
                             % (rec, kod, pokryv,
                                ", ".join("[%s]" % c for c in conflicts),
                                keep["fid"]))
+
+    # ---------- 0c/0d. duplicitné záznamy v tblAktivity a tblHabBiotopyOpatrenia ----------
+    # tblAktivity: [fkRECORDID] + [Aktivita] musia byť unikátne;
+    # tblHabBiotopyOpatrenia: [fkHabBiotopyID] + [kod_opatrenia] (beží až po
+    # 0b, lebo zlúčenie biotopov presúva opatrenia a môže vytvoriť duplicity).
+    # Duplicity sa zlúčia do záznamu s najviac vyplnenými stĺpcami, jeho
+    # prázdne stĺpce sa doplnia zo zmazaných. Ak majú duplicity rozdielne
+    # vyplnené hodnoty, nezlučujú sa (zlúčia sa len úplne zhodné) – varovanie.
+    biotop_by_id = {}
+    for r in cur.execute("SELECT id, fkRECORDID, biotop_cislo_new FROM tblHabBiotopy "
+                         "WHERE id IS NOT NULL ORDER BY fid"):
+        biotop_by_id.setdefault(r["id"], r)
+
+    def aktivita_name(key):
+        return "RECORDID=%s, aktivita '%s'" % key
+
+    def opatrenie_name(key):
+        b = biotop_by_id.get(int(key[0])) if key[0].lstrip("-").isdigit() else None
+        return "%sbiotop id=%s, opatrenie '%s'" % (
+            "RECORDID=%s, biotop '%s', " % (b["fkRECORDID"], b["biotop_cislo_new"])
+            if b else "", key[0], key[1])
+
+    for table, key_cols, value_cols, zero_empty, label in (
+            ("tblAktivity", ["fkRECORDID", "Aktivita"],
+             ["Intenzita", "Perc_Plochy", "Vplyv"], ("Perc_Plochy",), aktivita_name),
+            ("tblHabBiotopyOpatrenia", ["fkHabBiotopyID", "kod_opatrenia"],
+             ["detailny_opis_opatrenia", "percento_z_plochy_biotopu"],
+             ("percento_z_plochy_biotopu",), opatrenie_name)):
+        rows = cur.execute("SELECT * FROM %s ORDER BY fid" % table).fetchall()
+        merges, conflicts = plan_dedup(rows, key_cols, value_cols, zero_empty)
+        for key, keep, drop, fill in merges:
+            if fill:
+                cur.execute("UPDATE %s SET %s WHERE fid = ?"
+                            % (table, ", ".join('"%s" = ?' % c for c in fill)),
+                            list(fill.values()) + [keep["fid"]])
+            cur.executemany("DELETE FROM %s WHERE fid = ?" % table,
+                            [(r["fid"],) for r in drop])
+            fixes.append("%s: %s: zmazaných %d duplicitných záznamov (fid=%s), "
+                         "ponechaný fid=%s%s."
+                         % (table, label(key), len(drop),
+                            ", ".join(str(r["fid"]) for r in drop), keep["fid"],
+                            ", doplnené: %s" % ", ".join("[%s]" % c for c in fill)
+                            if fill else ""))
+        for key, group, diff_cols in conflicts:
+            warnings.append("%s: %s: duplicity majú rozdielne hodnoty v %s – "
+                            "ponechané ako samostatné záznamy, skontrolovať (%s)."
+                            % (table, label(key),
+                               ", ".join("[%s]" % c for c in diff_cols),
+                               "; ".join("fid=%s %s" % (r["fid"], ", ".join(
+                                   "[%s]=%s" % (c, r[c]) for c in diff_cols))
+                                   for r in group)))
 
     druhy = cur.execute("SELECT fid, fkRECORDID, etaz, kod_kbx, NAZOV_LAT "
                         "FROM tblHabDruhy").fetchall()
