@@ -73,17 +73,17 @@ GPKG_NAME = "MapovaniePrePS.gpkg"
 # (porovnáva sa s kódom prevedeným na veľké písmená, preto .upper())
 KBX_EXEMPT_CODES = {c.upper() for c in (
     "BRP01", "KRO11", "KRO12", "RAS04", "SKA08", "SKA09",
-    "LES11", "XX06", "VOD15a", "VOD15b", "LES",
+    "LES11", "XX06", "VOD15a", "VOD15b", "LES", "LKP",
     "NI", "O", "T", "V", "Vr", "Z", "IS", "G", "E", "CH", "I",
 )}
 # biotopy Katalógu 2023, ktoré nie sú národného významu ani Natura 2000 –
 # nekontroluje sa pri nich kvalita/manažment/vyhliadky ani opatrenia
 NON_PROTECTED_CODES = {c.upper() for c in (
-    "VOD02", "VOD03", "VOD08", "VOD10", "VOD11", "VOD14", "VOD15a",
+    "VOD02", "VOD03", "VOD08", "VOD10", "VOD11", "VOD14", "VOD15a", "VOD15",
     "BRP01", "BRP06", "BRP07", "BRP08b", "KRO04", "KRO05", "KRO11", "KRO12",
     "SKA09", "LES11", "XX01", "XX02", "XX03a", "XX03b", "XX03c",
     "XX04a", "XX04b", "XX04c", "XX04d", "XX04e", "XX04f",
-    "XX05", "XX06", "XX07", "XX08",
+    "XX05", "XX06", "XX07", "XX08", "LKP"
 )}
 # Braun-Blanquetova stupnica [POKRYVNOST] od najnižšej (formulár ponúka 1, 2a, 2b, 3)
 POKRYVNOST_ORDER = ["r", "+", "1", "2m", "2a", "2b", "3", "4", "5"]
