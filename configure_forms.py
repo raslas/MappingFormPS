@@ -778,25 +778,167 @@ Item {
 }
 """
 
+# ── "Možné biotopy" – biotopy, na ktoré ukazujú zapísané druhy ────────────────
+#
+# Panel at the top of the Druhy tab (QGIS desktop only for now) that lists the
+# Katalóg biotopov 2023 biotopes the polygon's species point to: how many of
+# each biotope's diagnostic, dominant and constant species are recorded, which
+# ones, and whether the biotope is already in tblHabBiotopy. The catalogue comes
+# from KatalogDruhy.gpkg next to the project, built by 10_katalog_druhy.py from
+# the Botany Explorer database (catalogue species already resolved to Tax_id).
+# The panel reads that file directly, so it is not a project layer and nothing
+# changes for QFieldCloud.
+#
+# The scoring below is plain Python without QGIS imports; test_biotop_panel.py
+# runs it on its own. It is pasted into the form init code.
+
+_BIOTOP_SCORE_CODE = r'''
+BOT_URL = "http://localhost/bot/?biotope=katalog:"
+# váha druhu podľa roly v katalógu (diagnostický > dominantný > konštantný)
+WEIGHTS = {"diag": 3, "dom": 2, "konst": 1}
+# (rola, skratka v počtoch, nadpis zoznamu druhov – None = druhy sa nevypisujú)
+ROLE_LABELS = (("diag", "diag", "diagnostické"), ("dom", "dom", "dominantné"),
+               ("konst", "konšt", None))
+MAX_ROWS = 8
+
+
+def _html(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def score_biotopes(druhy, katalog, biotopy, zapisane=()):
+    """Biotopy, na ktoré ukazujú druhy polygónu, od najlepšej zhody.
+
+    druhy    – [(Tax_id, etáž, názov)] záznamy tblHabDruhy polygónu
+    katalog  – {Tax_id: [(kód, druh katalógu, diag, konst, dom, etáže)]},
+               etáže = množina ('E3', ...), prázdna = ľubovoľná etáž
+    biotopy  – {kód: (názov, nadradený kód, n_diag, n_konst, n_dom)}
+    zapisane – kódy biotopov zapísané v tblHabBiotopy polygónu
+
+    Vráti (výsledky, zapísané bez zhody). Výsledok je dict s kľúčmi kod, nazov,
+    diag/konst/dom ({druh katalógu: [názvy z terénu]}), n_diag/n_konst/n_dom,
+    skore a zapisany. Druh katalógu sa ráta raz, aj keď ho v teréne pokrýva
+    viac záznamov (druh aj jeho poddruh). Druh s etážou v katalógu sa ráta len
+    vtedy, keď je zapísaný v tej istej etáži (alebo etáž chýba).
+    """
+    zapisane = {str(z).strip().upper() for z in zapisane if z and str(z).strip()}
+    hits = {}
+    for tax_id, etaz, nazov in druhy:
+        if tax_id is None:
+            continue
+        etaz = (etaz or "").strip().upper()
+        for kod, druh, diag, konst, dom, etaze in katalog.get(tax_id, ()):
+            if etaz and etaze and etaz not in etaze:
+                continue
+            h = hits.setdefault(kod, {"diag": {}, "konst": {}, "dom": {}})
+            for role, flag in (("diag", diag), ("konst", konst), ("dom", dom)):
+                if flag:
+                    names = h[role].setdefault(druh, [])
+                    if nazov and nazov not in names:
+                        names.append(nazov)
+
+    def recorded(kod):
+        info = biotopy.get(kod)
+        parent = info[1] if info else None
+        return kod.upper() in zapisane or bool(parent and parent.upper() in zapisane)
+
+    results = []
+    for kod, h in hits.items():
+        nazov, _parent, n_diag, n_konst, n_dom = biotopy.get(kod, ("", None, 0, 0, 0))
+        results.append({
+            "kod": kod, "nazov": nazov, "diag": h["diag"], "konst": h["konst"],
+            "dom": h["dom"], "n_diag": n_diag, "n_konst": n_konst, "n_dom": n_dom,
+            "skore": sum(WEIGHTS[r] * len(h[r]) for r in WEIGHTS),
+            "zapisany": recorded(kod),
+        })
+    results.sort(key=lambda r: (-r["skore"], -len(r["diag"]),
+                                -(len(r["diag"]) / r["n_diag"] if r["n_diag"] else 0),
+                                r["kod"]))
+
+    covered = set()
+    for r in results:
+        if r["diag"] or r["dom"]:
+            covered.add(r["kod"].upper())
+            parent = (biotopy.get(r["kod"]) or ("", None))[1]
+            if parent:
+                covered.add(parent.upper())
+    missing = sorted(z for z in zapisane if z not in covered)
+    return results, missing
+
+
+def render_html(results, missing, biotopy, druhy_count, max_rows=MAX_ROWS):
+    """HTML pre panel: najlepšie biotopy, zapísané vždy, upozornenia na konci."""
+    if not druhy_count:
+        return "<i>Polygón zatiaľ nemá žiadne druhy.</i>"
+    shown = [r for r in results[:max_rows] if r["skore"] > 0]
+    shown += [r for r in results[max_rows:] if r["zapisany"]]
+    parts = []
+    if not shown:
+        parts.append("<i>Žiadny zo zapísaných druhov nie je v Katalógu biotopov 2023 "
+                     "diagnostický, dominantný ani konštantný.</i>")
+    for r in shown:
+        mark = (' <span style="color:#2e7d32"><b>&#10003; zapísaný</b></span>'
+                if r["zapisany"] else "")
+        counts = " &middot; ".join("%s %d/%d" % (short, len(r[key]), r["n_" + key])
+                                   for key, short, _title in ROLE_LABELS)
+        lines = ['<b><a href="%s%s">%s</a></b> %s%s<br><small>%s</small>'
+                 % (BOT_URL, _html(r["kod"]), _html(r["kod"]), _html(r["nazov"]),
+                    mark, counts)]
+        for key, _short, title in ROLE_LABELS:
+            if title and r[key]:
+                lines.append('<br><small><span style="color:#555">%s:</span> %s</small>'
+                             % (title, _html(", ".join(sorted(r[key])))))
+        parts.append("".join(lines))
+    shown_codes = {r["kod"] for r in shown}
+    rest = sum(1 for r in results if r["skore"] > 0 and r["kod"] not in shown_codes)
+    if rest > 0:
+        parts.append("<small><i>… a ďalších %d biotopov so slabšou zhodou</i></small>" % rest)
+    for kod in missing:
+        info = biotopy.get(kod) or next(
+            (v for k, v in biotopy.items() if k.upper() == kod), None)
+        if info is None:
+            text = "%s nie je kód Katalógu biotopov 2023." % _html(kod)
+        elif not (info[2] or info[4]):
+            continue  # katalóg pri ňom diagnostické ani dominantné druhy neuvádza
+        else:
+            text = ("zapísaný biotop <b>%s</b> nemá medzi druhmi žiadny diagnostický "
+                    "ani dominantný druh." % _html(kod))
+        parts.append('<span style="color:#c62828">&#9888; %s</span>' % text)
+    return "<br><br>".join(parts)
+'''
+
 _FORM_INIT_CODE = r'''# -*- coding: utf-8 -*-
 # Generované skriptom configure_forms.py – needituj priamo v projekte.
 # Na kartu "Druhy" pridá tlačidlo, ktoré skopíruje druhy z formulára, ktorého
 # [RECORDID] je zapísané v poli [polygon_id_form], do práve otvoreného polygónu.
 # Tlačidlo je aktívne len vtedy, keď je [polygon_id_form] vyplnené.
 # Beží len v QGIS na počítači; v QField to isté robí QML widget nad zoznamom.
+# Nad zoznam druhov pridá aj panel "Možné biotopy" (Katalóg biotopov 2023).
+import os
 import re
+import sqlite3
+from pathlib import Path
 
+from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import (
     QBoxLayout,
     QGridLayout,
+    QGroupBox,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QTabWidget,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import QgsFeature, QgsProject
+from qgis.core import QgsFeature, QgsFeatureRequest, QgsMessageLog, QgsProject
+
+try:
+    from qgis.gui import QgsCollapsibleGroupBox as _PanelBox
+except ImportError:
+    _PanelBox = QGroupBox
 
 DRUHY_LAYER = "tblHabDruhy"
 DRUHY_TAB = "Druhy"
@@ -948,11 +1090,178 @@ def _hide_qml_widget(tab):
             widget.hide()
 
 
+# ── panel "Možné biotopy" ─────────────────────────────────────────────────────
+__BIOTOP_SCORE_CODE__
+
+KATALOG_FILE = "KatalogDruhy.gpkg"
+BIOTOPY_LAYER = "tblHabBiotopy"
+PANEL_NAME = "grp_mozne_biotopy"
+PANEL_TITLE = "Možné biotopy podľa druhov (Katalóg biotopov 2023)"
+# init kód sa spúšťa pri každom otvorení formulára – katalóg sa načíta raz
+_mozne_biotopy_cache = globals().setdefault("_mozne_biotopy_cache", {})
+
+
+def _plain(value):
+    """NULL z QGIS (QVariant) -> None."""
+    if value is None or (hasattr(value, "isNull") and value.isNull()):
+        return None
+    return value
+
+
+def _load_katalog():
+    """(katalog, biotopy) z KatalogDruhy.gpkg v priečinku projektu."""
+    path = os.path.join(QgsProject.instance().homePath(), KATALOG_FILE)
+    if not os.path.exists(path):
+        raise FileNotFoundError("Chýba %s v priečinku projektu – spusti "
+                                "10_katalog_druhy.py." % KATALOG_FILE)
+    stamp = (path, os.path.getmtime(path))
+    if _mozne_biotopy_cache.get("stamp") != stamp:
+        con = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+        try:
+            katalog = {}
+            for tax_id, kod, druh, diag, konst, dom, etaz in con.execute(
+                    "SELECT Tax_id, kod_2023, druh_katalog, diag, konst, dom, etaz "
+                    "FROM KatalogDruhy"):
+                etaze = frozenset(e.strip().upper() for e in (etaz or "").split(",") if e.strip())
+                katalog.setdefault(tax_id, []).append((kod, druh, diag, konst, dom, etaze))
+            biotopy = {kod: (nazov, nadradeny, n_diag, n_konst, n_dom)
+                       for kod, nazov, nadradeny, n_diag, n_konst, n_dom in con.execute(
+                           "SELECT kod_2023, nazov_2023, nadradeny, n_diag, n_konst, n_dom "
+                           "FROM KatalogBiotopy")}
+        finally:
+            con.close()
+        _mozne_biotopy_cache.update(stamp=stamp, data=(katalog, biotopy))
+    return _mozne_biotopy_cache["data"]
+
+
+def _children(layer_name, recordid, fields):
+    """Záznamy podriadenej tabuľky polygónu (aj neuložené) ako n-tice hodnôt."""
+    layers = QgsProject.instance().mapLayersByName(layer_name)
+    if not layers:
+        return []
+    value = recordid if recordid.lstrip("-").isdigit() else "'%s'" % recordid.replace("'", "''")
+    request = QgsFeatureRequest().setFilterExpression('"fkRECORDID" = %s' % value)
+    return [tuple(_plain(f[name]) for name in fields) for f in layers[0].getFeatures(request)]
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _place_top(tab, widget):
+    """Vloží widget úplne hore na kartu."""
+    layout = tab.layout()
+    if layout is None:
+        layout = QVBoxLayout(tab)
+        tab.setLayout(layout)
+    if isinstance(layout, QBoxLayout):
+        layout.insertWidget(0, widget)
+    elif isinstance(layout, QGridLayout):
+        # mriežka nemá vkladanie riadku – všetko sa posunie o riadok nižšie
+        items = []
+        while layout.count():
+            i = layout.count() - 1
+            items.append((layout.getItemPosition(i), layout.takeAt(i)))
+        rows = max([r + rs for (r, _c, rs, _cs), _it in items] or [0])
+        for r in range(rows, 0, -1):
+            layout.setRowStretch(r, layout.rowStretch(r - 1))
+        layout.setRowStretch(0, 0)
+        for (r, c, rs, cs), item in reversed(items):
+            layout.addItem(item, r + 1, c, rs, cs)
+        layout.addWidget(widget, 0, 0, 1, max(layout.columnCount(), 1))
+    else:
+        layout.addWidget(widget)
+
+
+def _disconnect(signals, slot):
+    for signal in signals:
+        try:
+            signal.disconnect(slot)
+        except (TypeError, RuntimeError):
+            pass
+
+
+class _MozneBiotopy(_PanelBox):
+    """Biotopy, na ktoré ukazujú druhy polygónu; obnoví sa pri každej zmene druhov."""
+
+    def __init__(self, dialog, feature, parent):
+        super().__init__(PANEL_TITLE, parent)
+        self.setObjectName(PANEL_NAME)
+        self._dialog = dialog
+        self._feature = feature
+        self.browser = QTextBrowser(self)
+        self.browser.setOpenExternalLinks(True)
+        self.browser.setMinimumHeight(80)
+        self.browser.setMaximumHeight(260)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(4, 4, 4, 4)
+        box.addWidget(self.browser)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(300)
+        self._timer.timeout.connect(self.refresh)
+
+        signals = []
+        for name in (DRUHY_LAYER, BIOTOPY_LAYER):
+            for layer in QgsProject.instance().mapLayersByName(name)[:1]:
+                for signal_name in ("featureAdded", "featureDeleted", "attributeValueChanged",
+                                    "afterCommitChanges", "afterRollBack"):
+                    signal = getattr(layer, signal_name)
+                    signal.connect(self.schedule)
+                    signals.append(signal)
+        recordid_widget = dialog.findChild(QLineEdit, "RECORDID")
+        if recordid_widget is not None:
+            # formulár v tabuľke atribútov prepína prvky bez nového otvorenia
+            recordid_widget.textChanged.connect(self.schedule)
+        slot = self.schedule
+        self.destroyed.connect(lambda *_args: _disconnect(signals, slot))
+        self.refresh()
+
+    def schedule(self, *_args):
+        try:
+            self._timer.start()
+        except RuntimeError:
+            pass  # formulár je už zatvorený
+
+    def refresh(self):
+        try:
+            recordid = _value(self._dialog, self._feature, "RECORDID")
+            if recordid is None:
+                html = "<i>Polygón ešte nemá [ID polygónu].</i>"
+            else:
+                katalog, biotopy = _load_katalog()
+                druhy = [(_as_int(kod), etaz, nazov) for kod, etaz, nazov
+                         in _children(DRUHY_LAYER, recordid, ("KOD", "etaz", "NAZOV_LAT"))]
+                zapisane = [b for (b,) in _children(BIOTOPY_LAYER, recordid,
+                                                    ("biotop_cislo_new",))]
+                results, missing = score_biotopes(druhy, katalog, biotopy, zapisane)
+                html = render_html(results, missing, biotopy, len(druhy))
+        except Exception as err:  # panel nesmie zablokovať formulár
+            html = '<span style="color:#c62828">%s</span>' % _html(err)
+        try:
+            self.browser.setHtml(html)
+        except RuntimeError:
+            pass
+
+
+def _add_biotop_panel(dialog, feature, tab):
+    if tab.findChild(QGroupBox, PANEL_NAME) is None:
+        _place_top(tab, _MozneBiotopy(dialog, feature, tab))
+
+
 def kopiruj_druhy_form_open(dialog, layer, feature):
     tab = _find_tab(dialog, DRUHY_TAB)
     if tab is None:
         return
     _hide_qml_widget(tab)
+    try:
+        _add_biotop_panel(dialog, feature, tab)
+    except Exception as err:  # chyba panelu nesmie zastaviť tlačidlo kopírovania
+        QgsMessageLog.logMessage("Panel Možné biotopy: %s" % err, "MappingFormPS")
     button = tab.findChild(QPushButton, BUTTON_NAME)
     if button is None:
         button = QPushButton(BUTTON_LABEL, tab)
@@ -994,7 +1303,9 @@ if r_aktivity:
 root_h.addChildElement(t_akt)
 
 cfg_h.setInitCodeSource(_CODE_SOURCE_DIALOG)
-cfg_h.setInitCode(_FORM_INIT_CODE.replace("__BUTTON_LABEL__", _COPY_BUTTON_LABEL))
+cfg_h.setInitCode(_FORM_INIT_CODE
+                  .replace("__BUTTON_LABEL__", _COPY_BUTTON_LABEL)
+                  .replace("__BIOTOP_SCORE_CODE__", _BIOTOP_SCORE_CODE))
 cfg_h.setInitFunction("kopiruj_druhy_form_open")
 
 hlavna.setEditFormConfig(cfg_h)
